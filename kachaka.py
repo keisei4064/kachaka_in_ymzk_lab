@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from turtle import width
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
@@ -11,7 +12,21 @@ import math
 
 
 @dataclass
-class Pose:
+class Coordinate:
+    """座標を表すデータクラス
+
+    Attributes:
+        x (float): x座標 [mm]
+        y (float): y座標 [mm]
+
+    """
+
+    x: float
+    y: float
+
+
+@dataclass
+class Pose(Coordinate):
     """姿勢を表すデータクラス
 
     Attributes:
@@ -21,8 +36,6 @@ class Pose:
 
     """
 
-    x: float
-    y: float
     theta: float
 
 
@@ -40,17 +53,17 @@ class Size:
     height: float
 
 
-def distance(pose1: Pose, pose2: Pose) -> float:
+def distance(point1: Coordinate, point2: Coordinate) -> float:
     """2点間の距離を求める
 
     Args:
-        pose1 (Pose): 始点
-        pose2 (Pose): 終点
+        point1 (Coordinate): 始点
+        point2 (Coordinate): 終点
 
     Returns:
         float: 2点間の距離 [mm]
     """
-    return math.sqrt((pose1.x - pose2.x) ** 2 + (pose1.y - pose2.y) ** 2)
+    return math.sqrt((point1.x - point2.x) ** 2 + (point1.y - point2.y) ** 2)
 
 
 def make_rectangle_to_center(
@@ -85,18 +98,46 @@ def make_rectangle_to_center(
         color=color,
         fill=fill,
         label=label,
+        linewidth=1.5,
     )
 
 
 @dataclass
+class LidarData:
+    def __init__(
+        self, raw_data_dist: np.ndarray, raw_data_theta: np.ndarray, offset_pose: Pose
+    ):
+        ratio = 1000
+        diff_angle = np.pi / 2
+        lidar_angle = raw_data_theta + diff_angle
+        self.x_data = raw_data_dist * ratio * np.cos(lidar_angle) + offset_pose.x
+        self.y_data = raw_data_dist * ratio * np.sin(lidar_angle) + offset_pose.y
+
+
+@dataclass
 class Grid:
-    """マップの1マスを表すデータクラス
+    """マップの1マスを表すクラス
 
     Attributes:
         can_pass (bool): 通行可能かどうか
     """
 
-    can_pass: bool
+    color = "lightgray"
+
+    def __init__(self, bottom_left: Coordinate, size: Size, can_pass: bool = True):
+        self.can_pass = can_pass
+        self.rect = Rectangle(
+            xy=(bottom_left.x, bottom_left.y),
+            width=size.width,
+            height=size.height,
+            color=Grid.color,
+            fill=not can_pass,
+            linewidth=0.5,
+        )
+
+    def draw(self, ax: matplotlib.axes.Axes):
+        self.rect.set_fill(not self.can_pass)
+        ax.add_patch(self.rect)
 
 
 class GridMap:
@@ -119,6 +160,35 @@ class GridMap:
         self.size = size
         self.grid_size = grid_size
         self.origin_offset = origin_offset
+
+        # グリッドの作成
+        width_num = math.ceil(size.width / grid_size.width) + 2
+        height_num = math.ceil(size.height / grid_size.height) + 2
+        self.grids: list[list[Grid]] = []
+        bottom_left = Coordinate(
+            -origin_offset.x - grid_size.width,
+            -origin_offset.y - grid_size.height,
+        )
+        for i in range(height_num):
+            row_list = []
+            for i in range(width_num):
+                row_list.append(Grid(bottom_left, grid_size))
+                bottom_left.x += grid_size.width
+            self.grids.append(row_list)
+            bottom_left.x = -origin_offset.x - grid_size.width
+            bottom_left.y += grid_size.height
+
+        for grid in self.grids[0][:]:
+            grid.can_pass = False
+        for grid in self.grids[-1][:]:
+            grid.can_pass = False
+        for row in self.grids:
+            row[0].can_pass = False
+            row[-1].can_pass = False
+
+        print(f"y:{len(self.grids)}")
+        print(f"x:{len(self.grids[0])}")
+        # print(self.grids)
 
         # 表示用の四角形を作成
         self.map_frame = Rectangle(
@@ -148,6 +218,9 @@ class GridMap:
         )
 
     def draw(self, ax: matplotlib.axes.Axes):
+        for row in self.grids:
+            for grid in row:
+                grid.draw(ax)
         ax.add_patch(self.start_zone)
         ax.add_patch(self.red_box_goal_zone)
         ax.add_patch(self.blue_box_goal_zone)
@@ -159,17 +232,31 @@ class GridMap:
             (-self.origin_offset.y, self.size.height - self.origin_offset.y),
         )
 
+    def CoordinateToGridIndex(self, coordinate: Coordinate) -> tuple[int, int]:
+        """座標からグリッドのインデックスを返す
 
-@dataclass
-class LidarData:
-    def __init__(
-        self, raw_data_dist: np.ndarray, raw_data_theta: np.ndarray, offset_pose: Pose
-    ):
-        ratio = 1000
-        diff_angle = np.pi / 2
-        lidar_angle = raw_data_theta + diff_angle
-        self.x_data = raw_data_dist * ratio * np.cos(lidar_angle) + offset_pose.x
-        self.y_data = raw_data_dist * ratio * np.sin(lidar_angle) + offset_pose.y
+        Args:
+            coordinate (Coordinate): 座標
+
+        Returns:
+            tuple[int, int]: グリッドのインデックス
+        """
+        x = math.ceil((coordinate.x + self.origin_offset.x) / self.grid_size.width)
+        y = math.ceil((coordinate.y + self.origin_offset.y) / self.grid_size.height)
+        return (x, y)
+
+    def DetectObstacleZone(self, lidar_data: LidarData) -> None:
+        for in_area_row in self.grids[1:-1]:
+            for in_area_grid in in_area_row[1:-1]:
+                in_area_grid.can_pass = True
+
+        for x, y in zip(lidar_data.x_data, lidar_data.y_data):
+            grid_index = self.CoordinateToGridIndex(Coordinate(x, y))
+            # マップの範囲内なら
+            if (0 < grid_index[0] < len(self.grids[0])) and (
+                0 < grid_index[1] < len(self.grids)
+            ):
+                self.grids[grid_index[1]][grid_index[0]].can_pass = False
 
 
 class KachakaBase(abc.ABC):
@@ -233,13 +320,13 @@ class KachakaBase(abc.ABC):
         )
 
         # 座標文字列の描画
-        text_pose = Pose(self.pose.x + 100, self.pose.y + 100, 0)
+        text_coordinate = Coordinate(self.pose.x + 100, self.pose.y + 100)
         text_content = "(x:{:.0f}, y:{:.0f}, θ:{:.2f})".format(
             self.pose.x, self.pose.y, self.pose.theta
         )
 
         # 軸に追加
-        ax.text(text_pose.x, text_pose.y, text_content, fontsize=8)
+        ax.text(text_coordinate.x, text_coordinate.y, text_content, fontsize=8)
         ax.add_patch(box_rect)
         ax.add_patch(left_wheel_rect)
         ax.add_patch(right_wheel_rect)
@@ -251,7 +338,7 @@ class KachakaBase(abc.ABC):
             self.lidar_data_cache.x_data,
             self.lidar_data_cache.y_data,
             color=KachakaBase.lidar_points_color,
-            linewidths=1,
+            marker=".",
         )
 
     @abc.abstractmethod
@@ -345,7 +432,7 @@ class Box:
     """カチャカで運ぶ箱"""
 
     plot_color = {
-        BoxColor.UNKNOWN: "lightgray",
+        BoxColor.UNKNOWN: "gray",
         BoxColor.RED: "red",
         BoxColor.BLUE: "blue",
     }
@@ -434,8 +521,8 @@ class Plotter:
 
     def update(self, map: GridMap, box: Box, kachaka: KachakaBase) -> None:
         map.draw(self.ax)
-        box.draw(self.ax)
         kachaka.draw(self.ax)
+        box.draw(self.ax)
         plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
         plt.show()
         self.ax.cla()
@@ -447,10 +534,10 @@ if __name__ == "__main__":
     red_box_goal = Pose(1500, -500, 0)
     blue_box_goal = Pose(250, 1500, 0)
     box = Box(initial_box_pose, Size(150, 200))
-    kachaka = VirtualKachaka("4")
+    kachaka = VirtualKachaka("2")
     map = GridMap(
         Size(2340, 2890),
-        grid_size=Size(50, 50),
+        grid_size=Size(150, 150),
         origin_offset=Pose(400, 950, 0),
         start=Pose(-200, 0, 0),
         red_box_goal=red_box_goal,
@@ -468,4 +555,6 @@ if __name__ == "__main__":
 
     # メインループ ---------------------------------------------------------
     while True:
+        lidar_data = kachaka.get_processed_lidar_data()
+        map.DetectObstacleZone(lidar_data)
         plotter.update(map, box, kachaka)
