@@ -526,7 +526,7 @@ class PathPlannerBase(abc.ABC):
         """
         for point in list(path.trace_poses.queue):
             index = map.CoordinateToGridIndex(point)
-            if map.grids[index[0]][index[1]].can_pass == False:
+            if map.grids[index[0]][index[1]].can_pass is False:
                 return True
 
         return False
@@ -656,7 +656,7 @@ if __name__ == "__main__":
     red_box_goal = Pose(1500, -500, 0)
     blue_box_goal = Pose(250, 1500, 0)
     box = Box(initial_box_pose, Size(150, 200))
-    kachaka = VirtualKachaka("6")
+    kachaka = VirtualKachaka("7")
     map = GridMap(
         Size(2340, 2890),
         grid_size=Size(150, 150),
@@ -671,7 +671,7 @@ if __name__ == "__main__":
     controller = Controller(kachaka, map, path_planner, logger)
 
     (x_lim, y_lim) = map.get_axes_lim()
-    # マージン確保
+    # 表示マージン確保
     margin = 1000
     x_lim = (x_lim[0] - margin, x_lim[1] + margin)
     y_lim = (y_lim[0] - margin, y_lim[1] + margin)
