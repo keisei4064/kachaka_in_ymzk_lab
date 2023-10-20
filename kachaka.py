@@ -8,6 +8,7 @@ import abc
 import queue
 from enum import Enum
 import math
+from IPython.display import display, clear_output
 
 
 @dataclass
@@ -611,22 +612,63 @@ class Controller:
     def __init__(
         self,
         kachaka: KachakaBase,
+        box: Box,
         map: GridMap,
         path_planner: PathPlannerBase,
         logger: ILogger,
     ):
         self.kachaka = kachaka
+        self.box = box
         self.map = map
         self.path_planner = path_planner
         self.logger = logger
         self.path: Path = Path([])
-        self.action = lambda: self.move_from_initial_box_pose_to_goal()
+        self.action = lambda: self.initialize_sensor()
+
+    def initialize_sensor(self) -> None:
+        self.logger("センサ情報を更新します")
+        self.kachaka.update_sensor_data()
+        lidar_data = kachaka.get_lidar_data()
+        map.DetectObstacleZone(lidar_data)
+
+        self.action = lambda: self.move_from_start_to_initial_box_pose()
+
+    def move_from_start_to_initial_box_pose(self) -> None:
+        self.logger("箱の前まで移動します")
+        self.kachaka.move_to_pose(
+            Pose(initial_box_pose.x, initial_box_pose.y - Box.size.height, 0)
+        )
+
+        self.action = lambda: self.color_recognize()
+
+    def color_recognize(self) -> None:
+        self.logger("箱の色を読みとります")
+        # 色認識処理------------
+        box.color = BoxColor.BLUE
+        # ---------------------
+        if box.color is BoxColor.BLUE:
+            self.logger("青の箱を検出しました")
+        elif box.color is BoxColor.RED:
+            self.logger("赤の箱を検出しました")
+        else:
+            self.logger("色の検出に失敗しました")
+
+        self.action = lambda: self.plan_path()
+
+    def plan_path(self):
+        self.logger("箱を運ぶ経路を生成します")
+        if box.color is BoxColor.BLUE:
+            goal = self.map.blue_box_goal
+        elif box.color is BoxColor.RED:
+            goal = self.map.red_box_goal
+
+        self.path = self.path_planner.plan_path(
+            self.map.initial_box_pose, goal, self.map
+        )
+        
 
     def move_from_initial_box_pose_to_goal(self) -> None:
         self.logger.log("Start moving from initial box pose to goal")
-        self.path = self.path_planner.plan_path(
-            self.map.initial_box_pose, self.map.red_box_goal, self.map
-        )
 
     def update(self) -> None:
         self.action()
@@ -638,6 +680,7 @@ class Plotter:
         x_lim: tuple[float, float],
         y_lim: tuple[float, float],
     ) -> None:
+        self.fig = plt.figure()
         self.ax = plt.subplot()
         self.ax.set_aspect("equal")
         self.x_lim = x_lim
@@ -653,7 +696,10 @@ class Plotter:
         box.draw(self.ax)
         path.draw(self.ax)
         plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
+
         plt.pause(0.1)
+        display(self.fig)
+        clear_output(wait=True)
 
 
 if __name__ == "__main__":
@@ -674,7 +720,7 @@ if __name__ == "__main__":
     )
     logger = TextLogger()
     path_planner = StraightPathPlanner()
-    controller = Controller(kachaka, map, path_planner, logger)
+    controller = Controller(kachaka, box, map, path_planner, logger)
 
     (x_lim, y_lim) = map.get_axes_lim()
     # 表示マージン確保
@@ -685,8 +731,5 @@ if __name__ == "__main__":
 
     # メインループ ---------------------------------------------------------
     while True:
-        lidar_data = kachaka.get_lidar_data()
-        map.DetectObstacleZone(lidar_data)
-        # controller.move_from_initial_box_pose_to_goal()
         controller.update()
         plotter.update(map, box, kachaka, controller.path)
