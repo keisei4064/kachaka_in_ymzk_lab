@@ -16,8 +16,5 @@ class RealKachaka(KachakaBase):
     def is_moving_finished(self):
         pass
 
-    def get_pose(self):
-        pass
-
-    def get_raw_lidar_data(self) -> tuple[np.ndarray, np.ndarray]:
+    def update_sensor_data(self):
         pass

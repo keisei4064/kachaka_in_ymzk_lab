@@ -284,10 +284,6 @@ class KachakaBase(abc.ABC):
     arrow_color = "black"
     lidar_points_color = "darkblue"
 
-    def __init__(self):
-        self.pose = Pose(0, 0, 0)
-        self.lidar_data_cache = LidarData(np.array([]), np.array([]), self.pose)
-
     def draw(self, ax: matplotlib.axes.Axes):
         # 車体の描画
         box_rect = make_rectangle_to_center(
@@ -349,8 +345,8 @@ class KachakaBase(abc.ABC):
 
         # 点群の描画
         ax.scatter(
-            self.lidar_data_cache.x_data,
-            self.lidar_data_cache.y_data,
+            self.lidar_data.x_data,
+            self.lidar_data.y_data,
             color=KachakaBase.lidar_points_color,
             marker=".",
         )
@@ -374,39 +370,30 @@ class KachakaBase(abc.ABC):
         pass
 
     @abc.abstractmethod
+    def update_sensor_data(self) -> None:
+        """センサデータ (LiDAR, 自己位置，カメラなど) を更新する"""
+
     def get_pose(self) -> Pose:
         """現在の姿勢を返す
 
         Returns:
             Pose: 現在の姿勢
         """
-        pass
+        return self.pose
 
-    @abc.abstractmethod
-    def get_raw_lidar_data(self) -> tuple[np.ndarray, np.ndarray]:
-        """未処理のLiDARデータ (距離と角度)をセットにして返す
-
-        Returns:
-            tuple[np.ndarray, np.ndarray]: [距離リスト，角度リスト]
-        """
-        pass
-
-    def get_processed_lidar_data(self) -> LidarData:
+    def get_lidar_data(self) -> LidarData:
         """座標に変換したLiDARデータを返す
 
         Returns:
             LidarData: 座標に変換したLiDARデータ
         """
-        self.lidar_data_cache = LidarData(*self.get_raw_lidar_data(), self.pose)
-        return self.lidar_data_cache
+        return self.lidar_data
 
 
 class VirtualKachaka(KachakaBase):
     def __init__(self, data_num="3"):
-        super().__init__()
         self.path = "data/sensor_data" + data_num + "/"
-        self.pose = self.get_pose()
-        self.get_processed_lidar_data()
+        self.update_sensor_data()
 
     def move_to_pose(self, distination: Pose):
         pass
@@ -414,16 +401,15 @@ class VirtualKachaka(KachakaBase):
     def is_moving_finished(self):
         pass
 
-    def get_pose(self):
+    def update_sensor_data(self):
+        ratio = 1000
         with open(self.path + "position.pkl", "rb") as file:
             position = pickle.load(file)
 
-        ratio = 1000
+        self.pose = Pose(
+            position["x"] * ratio, position["y"] * ratio, position["theta"]
+        )
 
-        return Pose(position["x"] * ratio, position["y"] * ratio, position["theta"])
-
-    def get_raw_lidar_data(self) -> tuple[np.ndarray, np.ndarray]:
-        # データ取得処理...
         data_num = "3"
         path = "data/sensor_data" + data_num + "/"
 
@@ -433,7 +419,7 @@ class VirtualKachaka(KachakaBase):
         with open(path + "dist.pkl", "rb") as file:
             dist = pickle.load(file)
 
-        return (dist, theta)
+        self.lidar_data = LidarData(dist, theta, self.pose)
 
 
 class BoxColor(Enum):
@@ -617,14 +603,16 @@ class Controller:
         self.path_planner = path_planner
         self.logger = logger
         self.path: Path = Path([])
+        self.action = lambda: self.move_from_initial_box_pose_to_goal()
 
     def move_from_initial_box_pose_to_goal(self) -> None:
+        logger.log("Start moving from initial box pose to goal")
         self.path = self.path_planner.plan_path(
             self.map.initial_box_pose, self.map.blue_box_goal, self.map
         )
 
-    def draw(self, ax: matplotlib.axes.Axes):
-        self.path.draw(ax)
+    def update(self) -> None:
+        self.action()
 
 
 class Plotter:
@@ -635,19 +623,18 @@ class Plotter:
     ) -> None:
         self.ax = plt.subplot()
         self.ax.set_aspect("equal")
+
+    def update(self, map: GridMap, box: Box, kachaka: KachakaBase, path: Path) -> None:
+        plt.cla()
         self.ax.set_xlim(*x_lim)
         self.ax.set_ylim(*y_lim)
 
-    def update(
-        self, map: GridMap, box: Box, kachaka: KachakaBase, controller: Controller
-    ) -> None:
         map.draw(self.ax)
         kachaka.draw(self.ax)
         box.draw(self.ax)
-        controller.draw(self.ax)
+        path.draw(self.ax)
         plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
-        plt.show()
-        self.ax.cla()
+        plt.pause(0.1)
 
 
 if __name__ == "__main__":
@@ -679,7 +666,8 @@ if __name__ == "__main__":
 
     # メインループ ---------------------------------------------------------
     while True:
-        lidar_data = kachaka.get_processed_lidar_data()
+        lidar_data = kachaka.get_lidar_data()
         map.DetectObstacleZone(lidar_data)
-        controller.move_from_initial_box_pose_to_goal()
-        plotter.update(map, box, kachaka, controller)
+        # controller.move_from_initial_box_pose_to_goal()
+        controller.update()
+        plotter.update(map, box, kachaka, controller.path)
