@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from turtle import width
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
@@ -102,16 +101,30 @@ def make_rectangle_to_center(
     )
 
 
-@dataclass
 class LidarData:
     def __init__(
         self, raw_data_dist: np.ndarray, raw_data_theta: np.ndarray, offset_pose: Pose
     ):
         ratio = 1000
         diff_angle = np.pi / 2
+        # lidar_angle = raw_data_theta + diff_angle + offset_pose.theta
         lidar_angle = raw_data_theta + diff_angle
-        self.x_data = raw_data_dist * ratio * np.cos(lidar_angle) + offset_pose.x
-        self.y_data = raw_data_dist * ratio * np.sin(lidar_angle) + offset_pose.y
+
+        # 0でない要素のインデックスを取得
+        non_zero_indices = np.nonzero(raw_data_dist)
+
+        self.x_data = (
+            raw_data_dist[non_zero_indices]
+            * ratio
+            * np.cos(lidar_angle[non_zero_indices])
+            + offset_pose.x
+        )
+        self.y_data = (
+            raw_data_dist[non_zero_indices]
+            * ratio
+            * np.sin(lidar_angle[non_zero_indices])
+            + offset_pose.y
+        )
 
 
 @dataclass
@@ -154,12 +167,17 @@ class GridMap:
         grid_size: Size,
         origin_offset: Pose,
         start: Pose,
+        initial_box_pose: Pose,
         red_box_goal: Pose,
         blue_box_goal: Pose,
     ):
         self.size = size
         self.grid_size = grid_size
         self.origin_offset = origin_offset
+        self.start = start
+        self.initial_box_pose = initial_box_pose
+        self.red_box_goal = red_box_goal
+        self.blue_box_goal = blue_box_goal
 
         # グリッドの作成
         width_num = math.ceil(size.width / grid_size.width) + 2
@@ -185,10 +203,6 @@ class GridMap:
         for row in self.grids:
             row[0].can_pass = False
             row[-1].can_pass = False
-
-        print(f"y:{len(self.grids)}")
-        print(f"x:{len(self.grids[0])}")
-        # print(self.grids)
 
         # 表示用の四角形を作成
         self.map_frame = Rectangle(
@@ -243,7 +257,7 @@ class GridMap:
         """
         x = math.ceil((coordinate.x + self.origin_offset.x) / self.grid_size.width)
         y = math.ceil((coordinate.y + self.origin_offset.y) / self.grid_size.height)
-        return (x, y)
+        return (y, x)
 
     def DetectObstacleZone(self, lidar_data: LidarData) -> None:
         for in_area_row in self.grids[1:-1]:
@@ -253,17 +267,17 @@ class GridMap:
         for x, y in zip(lidar_data.x_data, lidar_data.y_data):
             grid_index = self.CoordinateToGridIndex(Coordinate(x, y))
             # マップの範囲内なら
-            if (0 < grid_index[0] < len(self.grids[0])) and (
-                0 < grid_index[1] < len(self.grids)
+            if (0 < grid_index[1] < len(self.grids[0])) and (
+                0 < grid_index[0] < len(self.grids)
             ):
-                self.grids[grid_index[1]][grid_index[0]].can_pass = False
+                self.grids[grid_index[0]][grid_index[1]].can_pass = False
 
 
 class KachakaBase(abc.ABC):
     """カチャカの基底クラス"""
 
     box_size = Size(387, 240)
-    box_color = "silver"
+    box_color = "gray"
     wheel_size = Size(60, 20)
     wheel_color = "black"
     wheel_interval = 150
@@ -277,7 +291,7 @@ class KachakaBase(abc.ABC):
     def draw(self, ax: matplotlib.axes.Axes):
         # 車体の描画
         box_rect = make_rectangle_to_center(
-            self.pose, KachakaBase.box_size, KachakaBase.box_color, True, "Kachaka"
+            self.pose, KachakaBase.box_size, KachakaBase.box_color, False, "Kachaka"
         )
         left_wheel_rect = make_rectangle_to_center(
             Pose(
@@ -450,6 +464,8 @@ class Box:
 
 
 class Path:
+    color = "orange"
+
     def __init__(self, trace_poses: list[Pose]):
         self.trace_poses = queue.LifoQueue()
         for pose in trace_poses:
@@ -461,19 +477,106 @@ class Path:
     def is_goal(self) -> bool:
         return self.trace_poses.empty()
 
+    def draw(self, ax: matplotlib.axes.Axes):
+        trace_poses = list(self.trace_poses.queue)
+        # 矢印の描画
+        for pose in trace_poses:
+            point = Circle((pose.x, pose.y), 5, fill=True, color=Path.color)
+            arrow_length = 1
+            arrow = FancyArrow(
+                pose.x,
+                pose.y,
+                arrow_length * math.cos(pose.theta),
+                arrow_length * math.sin(pose.theta),
+                width=0.5,
+                head_width=50,
+                head_length=50,
+                color=Path.color,
+            )
+            ax.add_patch(point)
+            ax.add_patch(arrow)
 
-class IPathPlanner(abc.ABC):
+        # 線の描画
+        for i in range(len(trace_poses) - 1):
+            label = "Path" if i == 0 else None
+            ax.plot(
+                [trace_poses[i].x, trace_poses[i + 1].x],
+                [trace_poses[i].y, trace_poses[i + 1].y],
+                color=Path.color,
+                linewidth=1.0,
+                label=label,
+            )
+
+
+class PathPlannerBase(abc.ABC):
     @abc.abstractmethod
-    def plan_path(self, start: Pose, goal: Pose) -> Path:
+    def plan_path(self, box_start: Pose, box_goal: Pose, map: GridMap) -> Path:
         pass
 
+    @staticmethod
+    def IsObstacleOnPath(path: Path, map: GridMap) -> bool:
+        """障害物が道の上にあるかどうかを判定する
 
-class StraightPathPlanner(IPathPlanner):
+        Args:
+            path (Path): 道筋
+            map (GridMap): マップ
+
+        Returns:
+            bool: 障害物が道の上にある場合True, ない場合False
+        """
+        for point in list(path.trace_poses.queue):
+            index = map.CoordinateToGridIndex(point)
+            if map.grids[index[0]][index[1]].can_pass == False:
+                return True
+
+        return False
+
+
+class StraightPathPlanner(PathPlannerBase):
     def __init__(self):
         pass
 
+    def plan_path(self, box_start: Pose, box_goal: Pose, map: GridMap) -> Path:
+        # 分解能となる距離を計算
+        resolution_distance = (
+            math.sqrt(map.grid_size.width**2 + map.grid_size.height**2) / 2
+        )
 
-class CurvePathPlanner(IPathPlanner):
+        # x方向の移動点を計算
+        x_res = (
+            resolution_distance if box_start.x < box_goal.x else -resolution_distance
+        )
+        x_points = np.arange(box_start.x, box_goal.x, x_res)
+        x_move_theta = 0 if box_start.x < box_goal.x else math.pi
+        x_move_path = [Pose(x_point, box_start.y, x_move_theta) for x_point in x_points]
+        x_move_path.append(Pose(box_goal.x, box_start.y, x_move_theta))
+
+        # y方向の移動点を計算
+        y_res = (
+            resolution_distance if box_start.y < box_goal.y else -resolution_distance
+        )
+        y_points = np.arange(box_start.y, box_goal.y, y_res)
+        y_move_theta = math.pi / 2 if box_start.y < box_goal.y else -math.pi / 2
+        y_move_path = [Pose(box_goal.x, y_point, y_move_theta) for y_point in y_points]
+        y_move_path.append(Pose(box_goal.x, box_goal.y, y_move_theta))
+
+        # 統合
+        whole_path = x_move_path + y_move_path
+
+        if StraightPathPlanner.IsObstacleOnPath(Path(whole_path), map):  # 障害物がある場合
+            # x方向の移動とy方向の移動の順番を入れ替える
+            x_move_path = [
+                Pose(pose.x, box_goal.y, x_move_theta) for pose in x_move_path
+            ]
+            y_move_path = [
+                Pose(box_start.x, pose.y, y_move_theta) for pose in y_move_path
+            ]
+            whole_path = y_move_path + x_move_path
+
+        return Path(whole_path)
+
+
+class CurvePathPlanner(PathPlannerBase):
     def __init__(self):
         pass
 
@@ -502,10 +605,26 @@ class ChatLogger(ILogger):
 
 
 class Controller:
-    def __init__(self, kachaka: KachakaBase, map: GridMap, logger: ILogger):
+    def __init__(
+        self,
+        kachaka: KachakaBase,
+        map: GridMap,
+        path_planner: PathPlannerBase,
+        logger: ILogger,
+    ):
         self.kachaka = kachaka
         self.map = map
+        self.path_planner = path_planner
         self.logger = logger
+        self.path: Path = Path([])
+
+    def move_from_initial_box_pose_to_goal(self) -> None:
+        self.path = self.path_planner.plan_path(
+            self.map.initial_box_pose, self.map.blue_box_goal, self.map
+        )
+
+    def draw(self, ax: matplotlib.axes.Axes):
+        self.path.draw(ax)
 
 
 class Plotter:
@@ -519,10 +638,13 @@ class Plotter:
         self.ax.set_xlim(*x_lim)
         self.ax.set_ylim(*y_lim)
 
-    def update(self, map: GridMap, box: Box, kachaka: KachakaBase) -> None:
+    def update(
+        self, map: GridMap, box: Box, kachaka: KachakaBase, controller: Controller
+    ) -> None:
         map.draw(self.ax)
         kachaka.draw(self.ax)
         box.draw(self.ax)
+        controller.draw(self.ax)
         plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
         plt.show()
         self.ax.cla()
@@ -534,21 +656,23 @@ if __name__ == "__main__":
     red_box_goal = Pose(1500, -500, 0)
     blue_box_goal = Pose(250, 1500, 0)
     box = Box(initial_box_pose, Size(150, 200))
-    kachaka = VirtualKachaka("2")
+    kachaka = VirtualKachaka("6")
     map = GridMap(
         Size(2340, 2890),
         grid_size=Size(150, 150),
         origin_offset=Pose(400, 950, 0),
         start=Pose(-200, 0, 0),
+        initial_box_pose=initial_box_pose,
         red_box_goal=red_box_goal,
         blue_box_goal=blue_box_goal,
     )
     logger = TextLogger()
-    controller = Controller(kachaka, map, logger)
+    path_planner = StraightPathPlanner()
+    controller = Controller(kachaka, map, path_planner, logger)
 
     (x_lim, y_lim) = map.get_axes_lim()
     # マージン確保
-    margin = 1500
+    margin = 1000
     x_lim = (x_lim[0] - margin, x_lim[1] + margin)
     y_lim = (y_lim[0] - margin, y_lim[1] + margin)
     plotter = Plotter(x_lim, y_lim)
@@ -557,4 +681,5 @@ if __name__ == "__main__":
     while True:
         lidar_data = kachaka.get_processed_lidar_data()
         map.DetectObstacleZone(lidar_data)
-        plotter.update(map, box, kachaka)
+        controller.move_from_initial_box_pose_to_goal()
+        plotter.update(map, box, kachaka, controller)
