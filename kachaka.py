@@ -107,8 +107,8 @@ class LidarData:
     ):
         ratio = 1000
         diff_angle = np.pi / 2
-        # lidar_angle = raw_data_theta + diff_angle + offset_pose.theta
-        lidar_angle = raw_data_theta + diff_angle
+        lidar_angle = raw_data_theta + diff_angle + offset_pose.theta
+        # lidar_angle = raw_data_theta + diff_angle
 
         # 0でない要素のインデックスを取得
         non_zero_indices = np.nonzero(raw_data_dist)
@@ -391,7 +391,7 @@ class KachakaBase(abc.ABC):
 
 
 class VirtualKachaka(KachakaBase):
-    def __init__(self, data_num="3"):
+    def __init__(self, data_num):
         self.path = "data/sensor_data" + data_num + "/"
         self.update_sensor_data()
 
@@ -410,13 +410,10 @@ class VirtualKachaka(KachakaBase):
             position["x"] * ratio, position["y"] * ratio, position["theta"]
         )
 
-        data_num = "3"
-        path = "data/sensor_data" + data_num + "/"
-
-        with open(path + "theta.pkl", "rb") as file:
+        with open(self.path + "theta.pkl", "rb") as file:
             theta = pickle.load(file)
 
-        with open(path + "dist.pkl", "rb") as file:
+        with open(self.path + "dist.pkl", "rb") as file:
             dist = pickle.load(file)
 
         self.lidar_data = LidarData(dist, theta, self.pose)
@@ -436,15 +433,15 @@ class Box:
         BoxColor.RED: "red",
         BoxColor.BLUE: "blue",
     }
+    size = Size(150, 200)
 
-    def __init__(self, initial_pose: Pose, size: Size):
+    def __init__(self, initial_pose: Pose):
         self.color = BoxColor.UNKNOWN
         self.pose = initial_pose
-        self.size = size
 
     def draw(self, ax: matplotlib.axes.Axes):
         rect = make_rectangle_to_center(
-            self.pose, self.size, Box.plot_color[self.color], True, "Box"
+            self.pose, Box.size, Box.plot_color[self.color], True, "Box"
         )
         ax.add_patch(rect)
 
@@ -496,7 +493,7 @@ class Path:
 
 class PathPlannerBase(abc.ABC):
     @abc.abstractmethod
-    def plan_path(self, box_start: Pose, box_goal: Pose, map: GridMap) -> Path:
+    def plan_path(self, start: Pose, goal: Pose, map: GridMap) -> Path:
         pass
 
     @staticmethod
@@ -522,42 +519,62 @@ class StraightPathPlanner(PathPlannerBase):
     def __init__(self):
         pass
 
-    def plan_path(self, box_start: Pose, box_goal: Pose, map: GridMap) -> Path:
+    def plan_path(self, start: Pose, goal: Pose, map: GridMap) -> Path:
         # 分解能となる距離を計算
         resolution_distance = (
             math.sqrt(map.grid_size.width**2 + map.grid_size.height**2) / 2
         )
+        x_move_theta = 0 if start.x < goal.x else math.pi  # x方向移動時の角度
+        y_move_theta = math.pi / 2 if start.y < goal.y else -math.pi / 2  # y方向移動時の角度
 
         # x方向の移動点を計算
-        x_res = (
-            resolution_distance if box_start.x < box_goal.x else -resolution_distance
+        x_res = resolution_distance if start.x < goal.x else -resolution_distance
+        box_offset = Box.size.width if start.x < goal.x else -Box.size.width
+        x_points = np.arange(start.x, goal.x - box_offset, x_res)
+        x_move_path = [Pose(x_point, start.y, x_move_theta) for x_point in x_points]
+        x_move_path.append(Pose(goal.x - box_offset, start.y, x_move_theta))
+
+        # y方向へ箱をよけつつターン
+        start_turn_pose = x_move_path[-1]
+        y_target = (
+            start.y - Box.size.height if start.y < goal.y else start.y + Box.size.height
         )
-        x_points = np.arange(box_start.x, box_goal.x, x_res)
-        x_move_theta = 0 if box_start.x < box_goal.x else math.pi
-        x_move_path = [Pose(x_point, box_start.y, x_move_theta) for x_point in x_points]
-        x_move_path.append(Pose(box_goal.x, box_start.y, x_move_theta))
+        turn_path = [Pose(start_turn_pose.x, start_turn_pose.y, -y_move_theta)]
+        turn_path.append(Pose(start_turn_pose.x, y_target, -y_move_theta))
+        turn_path.append(Pose(goal.x, y_target, x_move_theta))
+        turn_path.append(Pose(goal.x, y_target, y_move_theta))
 
         # y方向の移動点を計算
-        y_res = (
-            resolution_distance if box_start.y < box_goal.y else -resolution_distance
-        )
-        y_points = np.arange(box_start.y, box_goal.y, y_res)
-        y_move_theta = math.pi / 2 if box_start.y < box_goal.y else -math.pi / 2
-        y_move_path = [Pose(box_goal.x, y_point, y_move_theta) for y_point in y_points]
-        y_move_path.append(Pose(box_goal.x, box_goal.y, y_move_theta))
+        y_res = resolution_distance if start.y < goal.y else -resolution_distance
+        box_offset = Box.size.height if start.y < goal.y else -Box.size.height
+        y_points = np.arange(start.y, goal.y - box_offset, y_res)
+        y_move_path = [Pose(goal.x, y_point, y_move_theta) for y_point in y_points]
+        y_move_path.append(Pose(goal.x, goal.y - box_offset, y_move_theta))
 
         # 統合
-        whole_path = x_move_path + y_move_path
+        whole_path = x_move_path + turn_path + y_move_path
 
         if StraightPathPlanner.IsObstacleOnPath(Path(whole_path), map):  # 障害物がある場合
             # x方向の移動とy方向の移動の順番を入れ替える
-            x_move_path = [
-                Pose(pose.x, box_goal.y, x_move_theta) for pose in x_move_path
+            x_move_path = [Pose(pose.x, goal.y, x_move_theta) for pose in x_move_path]
+            y_move_path = [Pose(start.x, pose.y, y_move_theta) for pose in y_move_path]
+
+            # x方向へ箱をよけつつターン
+            start_turn_pose = y_move_path[-1]
+            x_target = (
+                start.x - Box.size.width
+                if start.x < goal.x
+                else start.x + Box.size.width
+            )
+            turn_path.clear()
+            turn_path = [
+                Pose(start_turn_pose.x, start_turn_pose.y, x_move_theta + math.pi)
             ]
-            y_move_path = [
-                Pose(box_start.x, pose.y, y_move_theta) for pose in y_move_path
-            ]
-            whole_path = y_move_path + x_move_path
+            turn_path.append(Pose(x_target, start_turn_pose.y, x_move_theta + math.pi))
+            turn_path.append(Pose(x_target, goal.y, y_move_theta))
+            turn_path.append(Pose(x_target, goal.y, x_move_theta))
+
+            whole_path = y_move_path + turn_path + x_move_path
 
         return Path(whole_path)
 
@@ -606,9 +623,9 @@ class Controller:
         self.action = lambda: self.move_from_initial_box_pose_to_goal()
 
     def move_from_initial_box_pose_to_goal(self) -> None:
-        logger.log("Start moving from initial box pose to goal")
+        self.logger.log("Start moving from initial box pose to goal")
         self.path = self.path_planner.plan_path(
-            self.map.initial_box_pose, self.map.blue_box_goal, self.map
+            self.map.initial_box_pose, self.map.red_box_goal, self.map
         )
 
     def update(self) -> None:
@@ -623,11 +640,13 @@ class Plotter:
     ) -> None:
         self.ax = plt.subplot()
         self.ax.set_aspect("equal")
+        self.x_lim = x_lim
+        self.y_lim = y_lim
 
     def update(self, map: GridMap, box: Box, kachaka: KachakaBase, path: Path) -> None:
         plt.cla()
-        self.ax.set_xlim(*x_lim)
-        self.ax.set_ylim(*y_lim)
+        self.ax.set_xlim(*self.x_lim)
+        self.ax.set_ylim(*self.y_lim)
 
         map.draw(self.ax)
         kachaka.draw(self.ax)
@@ -640,10 +659,10 @@ class Plotter:
 if __name__ == "__main__":
     # 初期化 -------------------------------------------------------------
     initial_box_pose = Pose(1000, 1000, 0)
-    red_box_goal = Pose(1500, -500, 0)
+    red_box_goal = Pose(1700, -500, 0)
     blue_box_goal = Pose(250, 1500, 0)
-    box = Box(initial_box_pose, Size(150, 200))
-    kachaka = VirtualKachaka("7")
+    box = Box(initial_box_pose)
+    kachaka = VirtualKachaka("5")
     map = GridMap(
         Size(2340, 2890),
         grid_size=Size(150, 150),
