@@ -7,6 +7,7 @@ import abc
 import queue
 from enum import Enum
 import math
+import sys
 
 
 @dataclass
@@ -259,6 +260,11 @@ class GridMap:
         return (y, x)
 
     def DetectObstacleZone(self, lidar_data: LidarData) -> None:
+        """LiDARのデータから障害物のあるグリッドを検出し, マップを構成するグリッドが通過可能かどうかを更新する
+
+        Args:
+            lidar_data (LidarData): LiDARのデータ
+        """
         for in_area_row in self.grids[1:-1]:
             for in_area_grid in in_area_row[1:-1]:
                 in_area_grid.can_pass = True
@@ -270,6 +276,33 @@ class GridMap:
                 0 < grid_index[0] < len(self.grids)
             ):
                 self.grids[grid_index[0]][grid_index[1]].can_pass = False
+
+
+class BoxColor(Enum):
+    UNKNOWN = 0
+    RED = 1
+    BLUE = 2
+
+
+class Box:
+    """カチャカで運ぶ箱"""
+
+    plot_color = {
+        BoxColor.UNKNOWN: "gray",
+        BoxColor.RED: "red",
+        BoxColor.BLUE: "blue",
+    }
+    size = Size(150, 200)
+
+    def __init__(self, initial_pose: Pose):
+        self.color = BoxColor.UNKNOWN
+        self.pose = initial_pose
+
+    def draw(self, ax: matplotlib.axes.Axes):
+        rect = make_rectangle_to_center(
+            self.pose, Box.size, Box.plot_color[self.color], True, "Box"
+        )
+        ax.add_patch(rect)
 
 
 class KachakaBase(abc.ABC):
@@ -356,7 +389,7 @@ class KachakaBase(abc.ABC):
 
     @abc.abstractmethod
     def move_to_pose(self, distination: Pose) -> None:
-        """指定した姿勢まで移動する
+        """指定した姿勢まで移動する．（移動が完了するまで処理はブロック）
 
         Args:
             distination (Pose): 目標姿勢
@@ -364,17 +397,17 @@ class KachakaBase(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def is_moving_finished(self) -> bool:
-        """移動が完了したかどうかを返す
-
-        Returns:
-            bool: 完了時True, 未完了時False
-        """
-        pass
-
-    @abc.abstractmethod
     def update_sensor_data(self) -> None:
         """センサデータ (LiDAR, 自己位置，カメラなど) を更新する"""
+
+    @abc.abstractmethod
+    def recognize_box_color(self) -> BoxColor:
+        """箱の色を認識する
+
+        Returns:
+            BoxColor: 認識した色
+        """
+        pass
 
     def get_pose(self) -> Pose:
         """現在の姿勢を返す
@@ -393,52 +426,30 @@ class KachakaBase(abc.ABC):
         return self.lidar_data
 
 
-class BoxColor(Enum):
-    UNKNOWN = 0
-    RED = 1
-    BLUE = 2
+class Trajectory:
+    """経路を表すクラス．実質的には目標姿勢のキュー．"""
 
-
-class Box:
-    """カチャカで運ぶ箱"""
-
-    plot_color = {
-        BoxColor.UNKNOWN: "gray",
-        BoxColor.RED: "red",
-        BoxColor.BLUE: "blue",
-    }
-    size = Size(150, 200)
-
-    def __init__(self, initial_pose: Pose):
-        self.color = BoxColor.UNKNOWN
-        self.pose = initial_pose
-
-    def draw(self, ax: matplotlib.axes.Axes):
-        rect = make_rectangle_to_center(
-            self.pose, Box.size, Box.plot_color[self.color], True, "Box"
-        )
-        ax.add_patch(rect)
-
-
-class Path:
     color = "orange"
 
     def __init__(self, trace_poses: list[Pose]):
-        self.trace_poses = queue.LifoQueue()
-        for pose in trace_poses:
-            self.trace_poses.put(pose)
+        self.trace_poses = trace_poses
 
     def get_next_pose(self) -> Pose:
-        return self.trace_poses.get()
+        """次の目標姿勢を返し，軌道から削除する
+
+        Returns:
+            Pose: 次の目標姿勢
+        """
+        return self.trace_poses.pop(0)
 
     def is_goal(self) -> bool:
-        return self.trace_poses.empty()
+        # 目標姿勢がなくなったらゴール
+        return len(self.trace_poses) == 0
 
     def draw(self, ax: matplotlib.axes.Axes):
-        trace_poses = list(self.trace_poses.queue)
         # 矢印の描画
-        for pose in trace_poses:
-            point = Circle((pose.x, pose.y), 5, fill=True, color=Path.color)
+        for pose in self.trace_poses:
+            point = Circle((pose.x, pose.y), 5, fill=True, color=Trajectory.color)
             arrow_length = 1
             arrow = FancyArrow(
                 pose.x,
@@ -448,40 +459,53 @@ class Path:
                 width=0.5,
                 head_width=50,
                 head_length=50,
-                color=Path.color,
+                color=Trajectory.color,
             )
             ax.add_patch(point)
             ax.add_patch(arrow)
 
         # 線の描画
-        for i in range(len(trace_poses) - 1):
-            label = "Path" if i == 0 else None
+        for i in range(len(self.trace_poses) - 1):
+            label = "Trajectory" if i == 0 else None
             ax.plot(
-                [trace_poses[i].x, trace_poses[i + 1].x],
-                [trace_poses[i].y, trace_poses[i + 1].y],
-                color=Path.color,
+                [self.trace_poses[i].x, self.trace_poses[i + 1].x],
+                [self.trace_poses[i].y, self.trace_poses[i + 1].y],
+                color=Trajectory.color,
                 linewidth=1.0,
                 label=label,
             )
 
 
-class PathPlannerBase(abc.ABC):
+class TrajectoryPlannerBase(abc.ABC):
     @abc.abstractmethod
-    def plan_path(self, start: Pose, goal: Pose, map: GridMap) -> Path:
+    def plan_trajectory(
+        self, start: Pose, goal: Pose, map: GridMap, push_box: bool
+    ) -> Trajectory:
+        """スタート姿勢からゴール姿勢までを結ぶ経路を生成する
+
+        Args:
+            start (Pose): スタート姿勢
+            goal (Pose): ゴール姿勢
+            map (GridMap): マップ情報
+            push_box (bool): 箱を押すかどうか
+
+        Returns:
+            Trajectory: 生成した経路
+        """
         pass
 
     @staticmethod
-    def IsObstacleOnPath(path: Path, map: GridMap) -> bool:
-        """障害物が道の上にあるかどうかを判定する
+    def IsObstacleOnTrajectory(trajectory: Trajectory, map: GridMap) -> bool:
+        """障害物が経路上にあるかどうかを判定する
 
         Args:
-            path (Path): 道筋
+            trajectory (Trajectory): 道筋
             map (GridMap): マップ
 
         Returns:
             bool: 障害物が道の上にある場合True, ない場合False
         """
-        for point in list(path.trace_poses.queue):
+        for point in list(trajectory.trace_poses):
             index = map.CoordinateToGridIndex(point)
             if map.grids[index[0]][index[1]].can_pass is False:
                 return True
@@ -489,11 +513,13 @@ class PathPlannerBase(abc.ABC):
         return False
 
 
-class StraightPathPlanner(PathPlannerBase):
+class StraightTrajectoryPlanner(TrajectoryPlannerBase):
     def __init__(self):
         pass
 
-    def plan_path(self, start: Pose, goal: Pose, map: GridMap) -> Path:
+    def plan_trajectory(
+        self, start: Pose, goal: Pose, map: GridMap, push_box: bool
+    ) -> Trajectory:
         # 分解能となる距離を計算
         resolution_distance = (
             math.sqrt(map.grid_size.width**2 + map.grid_size.height**2) / 2
@@ -505,55 +531,67 @@ class StraightPathPlanner(PathPlannerBase):
         x_res = resolution_distance if start.x < goal.x else -resolution_distance
         box_offset = Box.size.width if start.x < goal.x else -Box.size.width
         x_points = np.arange(start.x, goal.x - box_offset, x_res)
-        x_move_path = [Pose(x_point, start.y, x_move_theta) for x_point in x_points]
-        x_move_path.append(Pose(goal.x - box_offset, start.y, x_move_theta))
+        x_move_trajectory = [
+            Pose(x_point, start.y, x_move_theta) for x_point in x_points
+        ]
+        x_move_trajectory.append(Pose(goal.x - box_offset, start.y, x_move_theta))
 
         # y方向へ箱をよけつつターン
-        start_turn_pose = x_move_path[-1]
+        start_turn_pose = x_move_trajectory[-1]
         y_target = (
             start.y - Box.size.height if start.y < goal.y else start.y + Box.size.height
         )
-        turn_path = [Pose(start_turn_pose.x, start_turn_pose.y, -y_move_theta)]
-        turn_path.append(Pose(start_turn_pose.x, y_target, -y_move_theta))
-        turn_path.append(Pose(goal.x, y_target, x_move_theta))
-        turn_path.append(Pose(goal.x, y_target, y_move_theta))
+        turn_trajectory = [Pose(start_turn_pose.x, start_turn_pose.y, -y_move_theta)]
+        turn_trajectory.append(Pose(start_turn_pose.x, y_target, -y_move_theta))
+        turn_trajectory.append(Pose(goal.x, y_target, x_move_theta))
+        turn_trajectory.append(Pose(goal.x, y_target, y_move_theta))
 
         # y方向の移動点を計算
         y_res = resolution_distance if start.y < goal.y else -resolution_distance
         box_offset = Box.size.height if start.y < goal.y else -Box.size.height
         y_points = np.arange(start.y, goal.y - box_offset, y_res)
-        y_move_path = [Pose(goal.x, y_point, y_move_theta) for y_point in y_points]
-        y_move_path.append(Pose(goal.x, goal.y - box_offset, y_move_theta))
+        y_move_trajectory = [
+            Pose(goal.x, y_point, y_move_theta) for y_point in y_points
+        ]
+        y_move_trajectory.append(Pose(goal.x, goal.y - box_offset, y_move_theta))
 
         # 統合
-        whole_path = x_move_path + turn_path + y_move_path
+        whole_trajectory = x_move_trajectory + turn_trajectory + y_move_trajectory
 
-        if StraightPathPlanner.IsObstacleOnPath(Path(whole_path), map):  # 障害物がある場合
+        if StraightTrajectoryPlanner.IsObstacleOnTrajectory(
+            Trajectory(whole_trajectory), map
+        ):  # 障害物がある場合
             # x方向の移動とy方向の移動の順番を入れ替える
-            x_move_path = [Pose(pose.x, goal.y, x_move_theta) for pose in x_move_path]
-            y_move_path = [Pose(start.x, pose.y, y_move_theta) for pose in y_move_path]
+            x_move_trajectory = [
+                Pose(pose.x, goal.y, x_move_theta) for pose in x_move_trajectory
+            ]
+            y_move_trajectory = [
+                Pose(start.x, pose.y, y_move_theta) for pose in y_move_trajectory
+            ]
 
             # x方向へ箱をよけつつターン
-            start_turn_pose = y_move_path[-1]
+            start_turn_pose = y_move_trajectory[-1]
             x_target = (
                 start.x - Box.size.width
                 if start.x < goal.x
                 else start.x + Box.size.width
             )
-            turn_path.clear()
-            turn_path = [
+            turn_trajectory.clear()
+            turn_trajectory = [
                 Pose(start_turn_pose.x, start_turn_pose.y, x_move_theta + math.pi)
             ]
-            turn_path.append(Pose(x_target, start_turn_pose.y, x_move_theta + math.pi))
-            turn_path.append(Pose(x_target, goal.y, y_move_theta))
-            turn_path.append(Pose(x_target, goal.y, x_move_theta))
+            turn_trajectory.append(
+                Pose(x_target, start_turn_pose.y, x_move_theta + math.pi)
+            )
+            turn_trajectory.append(Pose(x_target, goal.y, y_move_theta))
+            turn_trajectory.append(Pose(x_target, goal.y, x_move_theta))
 
-            whole_path = y_move_path + turn_path + x_move_path
+            whole_trajectory = y_move_trajectory + turn_trajectory + x_move_trajectory
 
-        return Path(whole_path)
+        return Trajectory(whole_trajectory)
 
 
-class CurvePathPlanner(PathPlannerBase):
+class CurveTrajectoryPlanner(TrajectoryPlannerBase):
     def __init__(self):
         pass
 
@@ -587,15 +625,15 @@ class Controller:
         kachaka: KachakaBase,
         box: Box,
         map: GridMap,
-        path_planner: PathPlannerBase,
+        trajectory_planner: TrajectoryPlannerBase,
         logger: ILogger,
     ):
         self.kachaka = kachaka
         self.box = box
         self.map = map
-        self.path_planner = path_planner
+        self.trajectory_planner = trajectory_planner
         self.logger = logger
-        self.path: Path = Path([])
+        self.trajectory: Trajectory = Trajectory([])
         self.action = lambda: self.initialize_sensor()
 
     def initialize_sensor(self) -> None:
@@ -610,8 +648,10 @@ class Controller:
         self.logger.log("箱の前まで移動します")
         self.kachaka.move_to_pose(
             Pose(
-                self.map.initial_box_pose.x,
-                self.map.initial_box_pose.y - Box.size.height,
+                self.map.initial_box_pose.x
+                - Box.size.width
+                - KachakaBase.box_size.height,
+                self.map.initial_box_pose.y,
                 0,
             )
         )
@@ -621,32 +661,57 @@ class Controller:
     def color_recognize(self) -> None:
         self.logger.log("箱の色を読みとります")
         # 色認識処理------------
-        self.box.color = BoxColor.BLUE
+        self.box.color = self.kachaka.recognize_box_color()
         # ---------------------
         if self.box.color is BoxColor.BLUE:
-            self.logger.log("青の箱を検出しました")
+            self.logger.log("   青の箱を検出しました")
         elif self.box.color is BoxColor.RED:
-            self.logger.log("赤の箱を検出しました")
+            self.logger.log("   赤の箱を検出しました")
         else:
-            self.logger.log("色の検出に失敗しました")
+            self.logger.log("   色の検出に失敗しました")
 
-        self.action = lambda: self.plan_path()
+        self.action = lambda: self.plan_trajectory_of_carrying_box()
 
-    def plan_path(self):
+    def plan_trajectory_of_carrying_box(self):
         self.logger.log("箱を運ぶ経路を生成します")
         goal = None
         if self.box.color is BoxColor.BLUE:
             goal = self.map.blue_box_goal
         elif self.box.color is BoxColor.RED:
             goal = self.map.red_box_goal
+        else:
+            self.logger.log("箱の色が不明です")
+            sys.exit("異常終了")
 
-        if goal is not None:
-            self.path = self.path_planner.plan_path(
-                self.map.initial_box_pose, goal, self.map
-            )
+        # 経路生成
+        self.trajectory = self.trajectory_planner.plan_trajectory(
+            self.map.initial_box_pose, goal, self.map, True
+        )
 
-    def move_from_initial_box_pose_to_goal(self) -> None:
-        self.logger.log("Start moving from initial box pose to goal")
+        self.action = (
+            lambda: self.plan_trajectory_from_now_position_to_carrying_box_start()
+        )
+
+    def plan_trajectory_from_now_position_to_carrying_box_start(self):
+        self.logger.log("現在位置から箱運搬経路のスタートまでの経路を生成します")
+
+        # 経路生成
+        # 未実装
+        self.action = lambda: self.follow_trajectory()
+
+    def follow_trajectory(self) -> None:
+        # ゴール判定
+        if self.trajectory.is_goal():
+            self.action = lambda: self.finish_task()
+            return
+
+        # 経路を辿る
+        self.logger.log("経路を辿ります")
+        self.kachaka.move_to_pose(self.trajectory.get_next_pose())
+
+    def finish_task(self) -> None:
+        self.logger.log("タスクが完了しました")
+        sys.exit("正常終了")
 
     def update(self) -> None:
         self.action()
@@ -669,13 +734,13 @@ class Plotter:
         map: GridMap,
         box: Box,
         kachaka: KachakaBase,
-        path: Path,
+        trajectory: Trajectory,
     ):
         plt.cla()
         map.draw(self.ax)
         kachaka.draw(self.ax)
         box.draw(self.ax)
-        path.draw(self.ax)
+        trajectory.draw(self.ax)
         self.ax.set_xlim(*self.x_lim)
         self.ax.set_ylim(*self.y_lim)
         plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
