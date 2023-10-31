@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 import numpy as np
-import pickle
 import matplotlib.pyplot as plt
 import matplotlib.axes
 from matplotlib.patches import Rectangle, Circle, FancyArrow
@@ -8,7 +7,6 @@ import abc
 import queue
 from enum import Enum
 import math
-from IPython.display import display, clear_output
 
 
 @dataclass
@@ -285,6 +283,10 @@ class KachakaBase(abc.ABC):
     arrow_color = "black"
     lidar_points_color = "darkblue"
 
+    def __init__(self):
+        self.pose = Pose(0, 0, 0)
+        self.lidar_data = LidarData(np.array([]), np.array([]), self.pose)
+
     def draw(self, ax: matplotlib.axes.Axes):
         # 車体の描画
         box_rect = make_rectangle_to_center(
@@ -389,35 +391,6 @@ class KachakaBase(abc.ABC):
             LidarData: 座標に変換したLiDARデータ
         """
         return self.lidar_data
-
-
-class VirtualKachaka(KachakaBase):
-    def __init__(self, data_num):
-        self.path = "data/sensor_data" + data_num + "/"
-        self.update_sensor_data()
-
-    def move_to_pose(self, distination: Pose):
-        pass
-
-    def is_moving_finished(self):
-        pass
-
-    def update_sensor_data(self):
-        ratio = 1000
-        with open(self.path + "position.pkl", "rb") as file:
-            position = pickle.load(file)
-
-        self.pose = Pose(
-            position["x"] * ratio, position["y"] * ratio, position["theta"]
-        )
-
-        with open(self.path + "theta.pkl", "rb") as file:
-            theta = pickle.load(file)
-
-        with open(self.path + "dist.pkl", "rb") as file:
-            dist = pickle.load(file)
-
-        self.lidar_data = LidarData(dist, theta, self.pose)
 
 
 class BoxColor(Enum):
@@ -626,46 +599,51 @@ class Controller:
         self.action = lambda: self.initialize_sensor()
 
     def initialize_sensor(self) -> None:
-        self.logger("センサ情報を更新します")
+        self.logger.log("センサ情報を更新します")
         self.kachaka.update_sensor_data()
-        lidar_data = kachaka.get_lidar_data()
-        map.DetectObstacleZone(lidar_data)
+        lidar_data = self.kachaka.get_lidar_data()
+        self.map.DetectObstacleZone(lidar_data)
 
         self.action = lambda: self.move_from_start_to_initial_box_pose()
 
     def move_from_start_to_initial_box_pose(self) -> None:
-        self.logger("箱の前まで移動します")
+        self.logger.log("箱の前まで移動します")
         self.kachaka.move_to_pose(
-            Pose(initial_box_pose.x, initial_box_pose.y - Box.size.height, 0)
+            Pose(
+                self.map.initial_box_pose.x,
+                self.map.initial_box_pose.y - Box.size.height,
+                0,
+            )
         )
 
         self.action = lambda: self.color_recognize()
 
     def color_recognize(self) -> None:
-        self.logger("箱の色を読みとります")
+        self.logger.log("箱の色を読みとります")
         # 色認識処理------------
-        box.color = BoxColor.BLUE
+        self.box.color = BoxColor.BLUE
         # ---------------------
-        if box.color is BoxColor.BLUE:
-            self.logger("青の箱を検出しました")
-        elif box.color is BoxColor.RED:
-            self.logger("赤の箱を検出しました")
+        if self.box.color is BoxColor.BLUE:
+            self.logger.log("青の箱を検出しました")
+        elif self.box.color is BoxColor.RED:
+            self.logger.log("赤の箱を検出しました")
         else:
-            self.logger("色の検出に失敗しました")
+            self.logger.log("色の検出に失敗しました")
 
         self.action = lambda: self.plan_path()
 
     def plan_path(self):
-        self.logger("箱を運ぶ経路を生成します")
-        if box.color is BoxColor.BLUE:
+        self.logger.log("箱を運ぶ経路を生成します")
+        goal = None
+        if self.box.color is BoxColor.BLUE:
             goal = self.map.blue_box_goal
-        elif box.color is BoxColor.RED:
+        elif self.box.color is BoxColor.RED:
             goal = self.map.red_box_goal
 
-        self.path = self.path_planner.plan_path(
-            self.map.initial_box_pose, goal, self.map
-        )
-        
+        if goal is not None:
+            self.path = self.path_planner.plan_path(
+                self.map.initial_box_pose, goal, self.map
+            )
 
     def move_from_initial_box_pose_to_goal(self) -> None:
         self.logger.log("Start moving from initial box pose to goal")
@@ -686,50 +664,19 @@ class Plotter:
         self.x_lim = x_lim
         self.y_lim = y_lim
 
-    def update(self, map: GridMap, box: Box, kachaka: KachakaBase, path: Path) -> None:
+    def update(
+        self,
+        map: GridMap,
+        box: Box,
+        kachaka: KachakaBase,
+        path: Path,
+    ):
         plt.cla()
-        self.ax.set_xlim(*self.x_lim)
-        self.ax.set_ylim(*self.y_lim)
-
         map.draw(self.ax)
         kachaka.draw(self.ax)
         box.draw(self.ax)
         path.draw(self.ax)
+        self.ax.set_xlim(*self.x_lim)
+        self.ax.set_ylim(*self.y_lim)
         plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
-
-        plt.pause(0.1)
-        display(self.fig)
-        clear_output(wait=True)
-
-
-if __name__ == "__main__":
-    # 初期化 -------------------------------------------------------------
-    initial_box_pose = Pose(1000, 1000, 0)
-    red_box_goal = Pose(1700, -500, 0)
-    blue_box_goal = Pose(250, 1500, 0)
-    box = Box(initial_box_pose)
-    kachaka = VirtualKachaka("5")
-    map = GridMap(
-        Size(2340, 2890),
-        grid_size=Size(150, 150),
-        origin_offset=Pose(400, 950, 0),
-        start=Pose(-200, 0, 0),
-        initial_box_pose=initial_box_pose,
-        red_box_goal=red_box_goal,
-        blue_box_goal=blue_box_goal,
-    )
-    logger = TextLogger()
-    path_planner = StraightPathPlanner()
-    controller = Controller(kachaka, box, map, path_planner, logger)
-
-    (x_lim, y_lim) = map.get_axes_lim()
-    # 表示マージン確保
-    margin = 1000
-    x_lim = (x_lim[0] - margin, x_lim[1] + margin)
-    y_lim = (y_lim[0] - margin, y_lim[1] + margin)
-    plotter = Plotter(x_lim, y_lim)
-
-    # メインループ ---------------------------------------------------------
-    while True:
-        controller.update()
-        plotter.update(map, box, kachaka, controller.path)
+        plt.pause(0.01)
