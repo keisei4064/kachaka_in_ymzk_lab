@@ -521,72 +521,92 @@ class StraightTrajectoryPlanner(TrajectoryPlannerBase):
         self, start: Pose, goal: Pose, map: GridMap, push_box: bool
     ) -> Trajectory:
         # 分解能となる距離を計算
-        resolution_distance = (
-            math.sqrt(map.grid_size.width**2 + map.grid_size.height**2) / 2
-        )
+        # resolution_distance = (
+        #     math.sqrt(map.grid_size.width**2 + map.grid_size.height**2) / 2
+        # )
+        resolution_distance = map.grid_size.height * 0.8
+
         x_move_theta = 0 if start.x < goal.x else math.pi  # x方向移動時の角度
         y_move_theta = math.pi / 2 if start.y < goal.y else -math.pi / 2  # y方向移動時の角度
 
-        # x方向の移動点を計算
-        x_res = resolution_distance if start.x < goal.x else -resolution_distance
-        box_offset = Box.size.width if start.x < goal.x else -Box.size.width
-        x_points = np.arange(start.x, goal.x - box_offset, x_res)
-        x_move_trajectory = [
-            Pose(x_point, start.y, x_move_theta) for x_point in x_points
-        ]
-        x_move_trajectory.append(Pose(goal.x - box_offset, start.y, x_move_theta))
+        if push_box:  # 箱を押す場合
+            # x方向の移動点を計算
+            x_res = resolution_distance if start.x < goal.x else -resolution_distance
+            box_offset = (Box.size.width / 2) + KachakaBase.box_size.height
+            if start.x > goal.x:
+                box_offset = -box_offset
 
-        # y方向へ箱をよけつつターン
-        start_turn_pose = x_move_trajectory[-1]
-        y_target = (
-            start.y - Box.size.height if start.y < goal.y else start.y + Box.size.height
-        )
-        turn_trajectory = [Pose(start_turn_pose.x, start_turn_pose.y, -y_move_theta)]
-        turn_trajectory.append(Pose(start_turn_pose.x, y_target, -y_move_theta))
-        turn_trajectory.append(Pose(goal.x, y_target, x_move_theta))
-        turn_trajectory.append(Pose(goal.x, y_target, y_move_theta))
-
-        # y方向の移動点を計算
-        y_res = resolution_distance if start.y < goal.y else -resolution_distance
-        box_offset = Box.size.height if start.y < goal.y else -Box.size.height
-        y_points = np.arange(start.y, goal.y - box_offset, y_res)
-        y_move_trajectory = [
-            Pose(goal.x, y_point, y_move_theta) for y_point in y_points
-        ]
-        y_move_trajectory.append(Pose(goal.x, goal.y - box_offset, y_move_theta))
-
-        # 統合
-        whole_trajectory = x_move_trajectory + turn_trajectory + y_move_trajectory
-
-        if StraightTrajectoryPlanner.IsObstacleOnTrajectory(
-            Trajectory(whole_trajectory), map
-        ):  # 障害物がある場合
-            # x方向の移動とy方向の移動の順番を入れ替える
+            x_points = np.arange(start.x, goal.x - box_offset, x_res)
             x_move_trajectory = [
-                Pose(pose.x, goal.y, x_move_theta) for pose in x_move_trajectory
+                Pose(x_point, start.y, x_move_theta) for x_point in x_points
             ]
-            y_move_trajectory = [
-                Pose(start.x, pose.y, y_move_theta) for pose in y_move_trajectory
-            ]
+            x_move_trajectory.append(Pose(goal.x - box_offset, start.y, x_move_theta))
 
-            # x方向へ箱をよけつつターン
-            start_turn_pose = y_move_trajectory[-1]
-            x_target = (
-                start.x - Box.size.width
-                if start.x < goal.x
-                else start.x + Box.size.width
+            # y方向へ箱をよけつつターン
+            start_turn_pose = x_move_trajectory[-1]
+            y_target = (
+                start.y - Box.size.height - KachakaBase.box_size.height
+                if start.y < goal.y
+                else start.y + Box.size.height + KachakaBase.box_size.height
             )
-            turn_trajectory.clear()
             turn_trajectory = [
-                Pose(start_turn_pose.x, start_turn_pose.y, x_move_theta + math.pi)
+                Pose(start_turn_pose.x, start_turn_pose.y, -y_move_theta)
             ]
-            turn_trajectory.append(
-                Pose(x_target, start_turn_pose.y, x_move_theta + math.pi)
-            )
-            turn_trajectory.append(Pose(x_target, goal.y, y_move_theta))
-            turn_trajectory.append(Pose(x_target, goal.y, x_move_theta))
+            turn_trajectory.append(Pose(start_turn_pose.x, y_target, -y_move_theta))
+            turn_trajectory.append(Pose(goal.x, y_target, x_move_theta))
+            turn_trajectory.append(Pose(goal.x, y_target, y_move_theta))
 
-            whole_trajectory = y_move_trajectory + turn_trajectory + x_move_trajectory
+            # y方向の移動点を計算
+            y_res = resolution_distance if start.y < goal.y else -resolution_distance
+
+            box_offset = (Box.size.height / 2) + KachakaBase.box_size.height
+            if start.y > goal.y:
+                box_offset = -box_offset
+
+            y_points = np.arange(start.y, goal.y - box_offset, y_res)
+            y_move_trajectory = [
+                Pose(goal.x, y_point, y_move_theta) for y_point in y_points
+            ]
+            y_move_trajectory.append(Pose(goal.x, goal.y - box_offset, y_move_theta))
+
+            # 統合
+            whole_trajectory = x_move_trajectory + turn_trajectory + y_move_trajectory
+
+            if StraightTrajectoryPlanner.IsObstacleOnTrajectory(
+                Trajectory(whole_trajectory), map
+            ):  # 障害物がある場合
+                # x方向の移動とy方向の移動の順番を入れ替える
+                x_move_trajectory = [
+                    Pose(pose.x, goal.y, x_move_theta) for pose in x_move_trajectory
+                ]
+                y_move_trajectory = [
+                    Pose(start.x, pose.y, y_move_theta) for pose in y_move_trajectory
+                ]
+
+                # x方向へ箱をよけつつターン
+                start_turn_pose = y_move_trajectory[-1]
+                x_target = (
+                    start.x - Box.size.width - KachakaBase.box_size.height
+                    if start.x < goal.x
+                    else start.x + Box.size.width + KachakaBase.box_size.height
+                )
+                turn_trajectory.clear()
+                turn_trajectory = [
+                    Pose(start_turn_pose.x, start_turn_pose.y, x_move_theta + math.pi)
+                ]
+                turn_trajectory.append(
+                    Pose(x_target, start_turn_pose.y, x_move_theta + math.pi)
+                )
+                turn_trajectory.append(Pose(x_target, goal.y, y_move_theta))
+                turn_trajectory.append(Pose(x_target, goal.y, x_move_theta))
+
+                whole_trajectory = (
+                    y_move_trajectory + turn_trajectory + x_move_trajectory
+                )
+
+        else:  # 箱を押さない場合
+            print("箱を押さない場合は未実装です")
+            sys.exit("異常終了")
 
         return Trajectory(whole_trajectory)
 
@@ -696,8 +716,85 @@ class Controller:
         self.logger.log("現在位置から箱運搬経路のスタートまでの経路を生成します")
 
         # 経路生成
-        # 未実装
+        # [0]: 箱の左側に移動（そのまま）
+        # [1]: 箱の上側に移動
+        # [2]: 箱の右側に移動
+        # [3]: 箱の下側に移動
+        dist_from_box = KachakaBase.box_size.height + Box.size.height
+        go_start_trajectory = [
+            [],
+            [
+                Pose(
+                    self.map.initial_box_pose.x - dist_from_box,
+                    self.map.initial_box_pose.y + dist_from_box,
+                    math.pi / 2,
+                ),
+                Pose(
+                    self.map.initial_box_pose.x,
+                    self.map.initial_box_pose.y + dist_from_box,
+                    0,
+                ),
+            ],
+            [
+                Pose(
+                    self.map.initial_box_pose.x - dist_from_box,
+                    self.map.initial_box_pose.y + dist_from_box,
+                    math.pi / 2,
+                ),
+                Pose(
+                    self.map.initial_box_pose.x,
+                    self.map.initial_box_pose.y + dist_from_box,
+                    0,
+                ),
+                Pose(
+                    self.map.initial_box_pose.x + dist_from_box,
+                    self.map.initial_box_pose.y + dist_from_box,
+                    0,
+                ),
+                Pose(
+                    self.map.initial_box_pose.x + dist_from_box,
+                    self.map.initial_box_pose.y,
+                    -math.pi / 2,
+                ),
+            ],
+            [
+                Pose(
+                    self.map.initial_box_pose.x - dist_from_box,
+                    self.map.initial_box_pose.y - dist_from_box,
+                    -math.pi / 2,
+                ),
+                Pose(
+                    self.map.initial_box_pose.x,
+                    self.map.initial_box_pose.y - dist_from_box,
+                    0,
+                ),
+            ],
+        ]
+
+        delta_x = self.trajectory.trace_poses[1].x - self.trajectory.trace_poses[0].x
+        delta_y = self.trajectory.trace_poses[1].y - self.trajectory.trace_poses[0].y
+
+        # 最初の動きの向きに合わせて経路を付け足す
+        additional_trajectory_index = 0
+        if abs(delta_x) > abs(delta_y):
+            if delta_x > 0:  # [0]
+                additional_trajectory_index = 0
+            else:  # [2]
+                additional_trajectory_index = 2
+        else:
+            if delta_y > 0:  # [3]
+                additional_trajectory_index = 3
+            else:  # [1]
+                additional_trajectory_index = 1
+
+        self.trajectory.trace_poses = (
+            go_start_trajectory[additional_trajectory_index]
+            + self.trajectory.trace_poses
+        )
+        print
+
         self.action = lambda: self.follow_trajectory()
+        self.logger.log("経路を辿ります")
 
     def follow_trajectory(self) -> None:
         # ゴール判定
@@ -706,7 +803,6 @@ class Controller:
             return
 
         # 経路を辿る
-        self.logger.log("経路を辿ります")
         self.kachaka.move_to_pose(self.trajectory.get_next_pose())
 
     def finish_task(self) -> None:
