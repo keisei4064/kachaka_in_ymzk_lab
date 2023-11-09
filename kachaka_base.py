@@ -4,10 +4,13 @@ import matplotlib.pyplot as plt
 import matplotlib.axes
 from matplotlib.patches import Rectangle, Circle, FancyArrow
 import abc
-import queue
 from enum import Enum
 import math
 import sys
+from IPython.display import display, Image, clear_output
+import os
+import shutil
+from PIL import Image as PILImage
 
 
 @dataclass
@@ -791,7 +794,7 @@ class Controller:
             go_start_trajectory[additional_trajectory_index]
             + self.trajectory.trace_poses
         )
-        print
+        # print
 
         self.action = lambda: self.follow_trajectory()
         self.logger.log("経路を辿ります")
@@ -818,12 +821,19 @@ class Plotter:
         self,
         x_lim: tuple[float, float],
         y_lim: tuple[float, float],
+        output_dir: str = "./plotter_output",
     ) -> None:
         self.fig = plt.figure()
         self.ax = plt.subplot()
         self.ax.set_aspect("equal")
         self.x_lim = x_lim
         self.y_lim = y_lim
+        self.image_count = 0
+        self.output_dir = output_dir
+        # 出力ディレクトリが存在する場合、削除して再作成
+        if os.path.exists(self.output_dir):
+            shutil.rmtree(self.output_dir)
+        os.makedirs(self.output_dir)
 
     def update(
         self,
@@ -832,6 +842,8 @@ class Plotter:
         kachaka: KachakaBase,
         trajectory: Trajectory,
     ):
+        # clear_output(wait=True)
+        clear_output()
         plt.cla()
         map.draw(self.ax)
         kachaka.draw(self.ax)
@@ -839,5 +851,26 @@ class Plotter:
         trajectory.draw(self.ax)
         self.ax.set_xlim(*self.x_lim)
         self.ax.set_ylim(*self.y_lim)
+
+        # 画像を保存
+        self.fig.savefig(
+            os.path.join(self.output_dir, f"figure_{self.image_count}.png")
+        )
+        self.image_count += 1
+
         plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
-        plt.pause(0.01)
+        # plt.pause(0.01)
+        plt.show()
+
+    def make_gif(self):
+        image_list = [
+            PILImage.open(os.path.join(self.output_dir, f"figure_{i}.png"))
+            for i in range(self.image_count)
+        ]
+        image_list[0].save(
+            self.output_dir + "/animation.gif",
+            save_all=True,
+            append_images=image_list[1:],
+            duration=200,
+            loop=0,
+        )
