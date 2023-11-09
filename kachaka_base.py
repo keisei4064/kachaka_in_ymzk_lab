@@ -842,8 +842,6 @@ class Plotter:
         kachaka: KachakaBase,
         trajectory: Trajectory,
     ):
-        # clear_output(wait=True)
-        clear_output()
         plt.cla()
         map.draw(self.ax)
         kachaka.draw(self.ax)
@@ -851,16 +849,16 @@ class Plotter:
         trajectory.draw(self.ax)
         self.ax.set_xlim(*self.x_lim)
         self.ax.set_ylim(*self.y_lim)
+        plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
 
         # 画像を保存
-        self.fig.savefig(
-            os.path.join(self.output_dir, f"figure_{self.image_count}.png")
-        )
+        path = os.path.join(self.output_dir, f"figure_{self.image_count}.png")
+        self.fig.savefig(path)
+        # 表示をクリア
+        clear_output(wait=True)
+        # 画像を表示
+        display(Image(filename=path))
         self.image_count += 1
-
-        plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
-        # plt.pause(0.01)
-        plt.show()
 
     def make_gif(self):
         image_list = [
@@ -874,3 +872,6 @@ class Plotter:
             duration=200,
             loop=0,
         )
+
+    def make_zip_package(self):
+        shutil.make_archive("plotter_output", "zip", self.output_dir)
