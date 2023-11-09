@@ -292,7 +292,7 @@ class Box:
         BoxColor.RED: "red",
         BoxColor.BLUE: "blue",
     }
-    size = Size(150, 200)
+    size = Size(160, 235)
 
     def __init__(self, initial_pose: Pose):
         self.color = BoxColor.UNKNOWN
@@ -521,10 +521,7 @@ class StraightTrajectoryPlanner(TrajectoryPlannerBase):
         self, start: Pose, goal: Pose, map: GridMap, push_box: bool
     ) -> Trajectory:
         # 分解能となる距離を計算
-        # resolution_distance = (
-        #     math.sqrt(map.grid_size.width**2 + map.grid_size.height**2) / 2
-        # )
-        resolution_distance = map.grid_size.height * 0.8
+        resolution_distance = map.grid_size.height * 0.9 # マップの1マスよりは小さくする
 
         x_move_theta = 0 if start.x < goal.x else math.pi  # x方向移動時の角度
         y_move_theta = math.pi / 2 if start.y < goal.y else -math.pi / 2  # y方向移動時の角度
