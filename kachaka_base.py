@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import List, Callable
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.axes
@@ -657,17 +658,26 @@ class Controller:
         self.trajectory_planner = trajectory_planner
         self.logger = logger
         self.trajectory: Trajectory = Trajectory([])
-        self.action = lambda: self.initialize_sensor()
+        # self.action = lambda: self.initialize_sensor()
+        # タスクキュー. タスクが完了したらTrueを返す関数を格納する
+        self.task_queue: List[Callable[[], bool]] = [
+            lambda: self.initialize_sensor(),
+            lambda: self.move_from_start_to_initial_box_pose(),
+            lambda: self.color_recognize(),
+            lambda: self.plan_trajectory_of_carrying_box(),
+            lambda: self.plan_trajectory_from_now_position_to_carrying_box_start(),
+            lambda: self.follow_trajectory(),
+            lambda: self.finish_task(),
+        ]
 
-    def initialize_sensor(self) -> None:
+    def initialize_sensor(self) -> bool:
         self.logger.log("センサ情報を更新します")
         self.kachaka.update_sensor_data()
         lidar_data = self.kachaka.get_lidar_data()
         self.map.DetectObstacleZone(lidar_data)
+        return True
 
-        self.action = lambda: self.move_from_start_to_initial_box_pose()
-
-    def move_from_start_to_initial_box_pose(self) -> None:
+    def move_from_start_to_initial_box_pose(self) -> bool:
         self.logger.log("箱の前まで移動します")
         self.kachaka.move_to_pose(
             Pose(
@@ -678,10 +688,9 @@ class Controller:
                 0,
             )
         )
+        return True
 
-        self.action = lambda: self.color_recognize()
-
-    def color_recognize(self) -> None:
+    def color_recognize(self) -> bool:
         self.logger.log("箱の色を読みとります")
         # 色認識処理------------
         self.box.color = self.kachaka.recognize_box_color()
@@ -693,9 +702,9 @@ class Controller:
         else:
             self.logger.log("   色の検出に失敗しました")
 
-        self.action = lambda: self.plan_trajectory_of_carrying_box()
+        return True
 
-    def plan_trajectory_of_carrying_box(self):
+    def plan_trajectory_of_carrying_box(self) -> bool:
         self.logger.log("箱を運ぶ経路を生成します")
         goal = None
         if self.box.color is BoxColor.BLUE:
@@ -711,11 +720,9 @@ class Controller:
             self.map.initial_box_pose, goal, self.map, True
         )
 
-        self.action = (
-            lambda: self.plan_trajectory_from_now_position_to_carrying_box_start()
-        )
+        return True
 
-    def plan_trajectory_from_now_position_to_carrying_box_start(self):
+    def plan_trajectory_from_now_position_to_carrying_box_start(self) -> bool:
         self.logger.log("現在位置から箱運搬経路のスタートまでの経路を生成します")
 
         # 経路生成
@@ -794,26 +801,39 @@ class Controller:
             go_start_trajectory[additional_trajectory_index]
             + self.trajectory.trace_poses
         )
-        # print
-
-        self.action = lambda: self.follow_trajectory()
         self.logger.log("経路を辿ります")
+        return True
 
-    def follow_trajectory(self) -> None:
+    def follow_trajectory(self) -> bool:
         # ゴール判定
         if self.trajectory.is_goal():
-            self.action = lambda: self.finish_task()
-            return
+            return True
 
         # 経路を辿る
         self.kachaka.move_to_pose(self.trajectory.get_next_pose())
+        return False
 
-    def finish_task(self) -> None:
+    def finish_task(self) -> bool:
         self.logger.log("タスクが完了しました")
-        sys.exit("正常終了")
+        # sys.exit("正常終了")
+        return True
 
     def update(self) -> None:
-        self.action()
+        # ロボットのセンサ情報を更新
+        self.kachaka.update_sensor_data()
+
+        # タスクの実行
+        result = self.task_queue[0]()
+        if result:
+            self.task_queue.pop(0)
+
+    def are_all_tasks_done(self) -> bool:
+        """全てのタスクが完了したかどうかを返す
+
+        Returns:
+            bool: 完了時True, 未完了時False
+        """
+        return len(self.task_queue) == 0
 
 
 class Plotter:
@@ -874,4 +894,11 @@ class Plotter:
         )
 
     def make_zip_package(self):
+        # もし既にzipファイルが存在する場合は削除
+        if os.path.exists("plotter_output.zip"):
+            os.remove("plotter_output.zip")
+
         shutil.make_archive("plotter_output", "zip", self.output_dir)
+
+    def close(self):
+        plt.close()
