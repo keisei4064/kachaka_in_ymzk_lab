@@ -313,6 +313,12 @@ class Box:
         ax.add_patch(rect)
 
 
+class PushingBoxStatus(Enum):
+    PUSHING = 0
+    DROPPED_LEFT = 1
+    DROPPED_RIGHT = 2
+
+
 class KachakaBase(abc.ABC):
     """カチャカの基底クラス"""
 
@@ -429,11 +435,13 @@ class KachakaBase(abc.ABC):
 
         # 箱との当たり判定
         self.is_pushing_box_flag = False
-        while self.is_collition_with_box(box.pose):
+        count = 0
+        while self.is_collition_with_box(box.pose) and count < 15:
             self.is_pushing_box_flag = True
             # 箱の移動
-            box.pose.x += delta_coordinate.x / 10.0
-            box.pose.y += delta_coordinate.y / 10.0
+            box.pose.x += delta_coordinate.x / 8.0
+            box.pose.y += delta_coordinate.y / 8.0
+            count += 1
 
     def is_pushing_box(self) -> bool:
         """箱を押しているかどうかを返す
@@ -471,6 +479,15 @@ class KachakaBase(abc.ABC):
             LidarData: 座標に変換したLiDARデータ
         """
         return self.lidar_data
+
+    @abc.abstractmethod
+    def check_pushing_box_by_camera(self) -> PushingBoxStatus:
+        """カメラで箱を押しているかどうかを確認する
+
+        Returns:
+            PushingBoxStatus: PUSHING: 箱を押せている場合, DROPPED_LEFT: 箱が左に落ちている場合, DROPPED_RIGHT: 箱が右に落ちている場合
+        """
+        pass
 
 
 class Trajectory:
@@ -537,6 +554,15 @@ class Trajectory:
             additional_trajectory (list[Pose]): 追加経路
         """
         self.trace_poses = self.trace_poses + additional_trajectory
+
+    def extend_beggining_path(self, distance: float):
+        move_angle = self.trace_poses[0].theta
+        extended_point = Pose(
+            self.trace_poses[0].x - distance * math.cos(move_angle),
+            self.trace_poses[0].y - distance * math.sin(move_angle),
+            move_angle,
+        )
+        self.trace_poses.insert(0, extended_point)
 
 
 class TrajectoryPlannerBase(abc.ABC):
@@ -695,13 +721,27 @@ class TextLogger(ILogger):
             print(message)
 
 
-class ChatLogger(ILogger):
-    def __init__(self):
-        pass
+def calc_kachaka_angle_from_box(kachaka_pose: Pose, box: Box) -> float:
+    """箱から見てカチャカがどの角度にあるか計算する
 
-    def log(self, message: str) -> None:
-        print(message)
-        # 喋る処理
+    Args:
+        kachaka (_type_): カチャカ
+        box (_type_): 箱
+
+    Returns:
+        float: 角度（π ~ -π）
+    """
+    dx = kachaka_pose.x - box.pose.x
+    dy = kachaka_pose.y - box.pose.y
+    return math.atan2(dy, dx)
+
+
+def clamp_to_pi_range(value: float):
+    while value > math.pi:
+        value -= 2 * math.pi
+    while value < -math.pi:
+        value += 2 * math.pi
+    return value
 
 
 class Controller:
@@ -734,7 +774,7 @@ class Controller:
         self.no_touching_box_rudius = Box.size.width + KachakaBase.box_size.height
 
     def initialize_sensor(self) -> bool:
-        self.logger.log("センサ情報を更新します")
+        # self.logger.log("センサ情報を更新します")
         self.kachaka.update_sensor_data()
         lidar_data = self.kachaka.get_lidar_data()
         self.map.DetectObstacleZone(lidar_data)
@@ -782,54 +822,64 @@ class Controller:
 
         # 経路生成
         self.trajectory = self.trajectory_planner.plan_trajectory(
-            self.map.initial_box_pose, goal, self.map, True
+            self.box.pose, goal, self.map, True
         )
 
         return True
 
     def plan_trajectory_from_now_position_to_carrying_box_start(self) -> bool:
-        delta_x = self.trajectory.trace_poses[1].x - self.trajectory.trace_poses[0].x
-        delta_y = self.trajectory.trace_poses[1].y - self.trajectory.trace_poses[0].y
-        move_angle = math.atan2(delta_y, delta_x)
-        self.logger.log(f"箱を運ぶ経路のスタートまでの経路を生成します. 箱の移動方向は{math.degrees(move_angle)}度です")
+        self.trajectory.extend_beggining_path(self.no_touching_box_rudius)
 
-        # 箱を押し始める位置を計算
-        normalized_delta_x = delta_x / math.sqrt(delta_x**2 + delta_y**2)
-        normalized_delta_y = delta_y / math.sqrt(delta_x**2 + delta_y**2)
-        push_box_start_pose = Pose(
-            self.trajectory.trace_poses[0].x
-            - normalized_delta_x * self.no_touching_box_rudius,
-            self.trajectory.trace_poses[0].y
-            - normalized_delta_y * self.no_touching_box_rudius,
-            move_angle,
+        now_angle_from_box = calc_kachaka_angle_from_box(self.kachaka.pose, self.box)
+        target_angle_from_box = calc_kachaka_angle_from_box(
+            self.trajectory.trace_poses[0], self.box
         )
+        move_angle = target_angle_from_box - now_angle_from_box  # 回転する角度
+        clamped_move_angle = clamp_to_pi_range(move_angle)
+        # self.logger.log(f"{move_angle=}")
 
         # 箱を避けながら押し始める位置まで円状に移動する経路を生成
         additional_trajectory: list[Pose] = []
-        if move_angle < 0:  # 箱に対して上に移動する場合
-            angles = np.arange(self.kachaka.pose.theta, move_angle, math.radians(-20))
+        if clamped_move_angle < 0:  # 箱に対して時計周りに動く
+            angles = np.arange(
+                now_angle_from_box,
+                now_angle_from_box + clamped_move_angle,
+                math.radians(-20),
+            )
             for angle in angles:
                 additional_trajectory.append(
                     Pose(
-                        self.box.pose.x - self.no_touching_box_rudius * math.cos(angle),
-                        self.box.pose.y - self.no_touching_box_rudius * math.sin(angle),
-                        angle + math.pi / 2,
-                    )
-                )
-        elif move_angle > 0:  # 箱に対して下に移動する場合
-            angles = np.arange(self.kachaka.pose.theta, move_angle, math.radians(+20))
-            for angle in angles:
-                additional_trajectory.append(
-                    Pose(
-                        self.box.pose.x - self.no_touching_box_rudius * math.cos(angle),
-                        self.box.pose.y - self.no_touching_box_rudius * math.sin(angle),
+                        self.box.pose.x + self.no_touching_box_rudius * math.cos(angle),
+                        self.box.pose.y + self.no_touching_box_rudius * math.sin(angle),
                         angle - math.pi / 2,
                     )
                 )
+        elif clamped_move_angle > 0:  # 箱に対して反時計回りに動く
+            angles = np.arange(
+                now_angle_from_box,
+                now_angle_from_box + clamped_move_angle,
+                math.radians(+20),
+            )
+            for angle in angles:
+                additional_trajectory.append(
+                    Pose(
+                        self.box.pose.x + self.no_touching_box_rudius * math.cos(angle),
+                        self.box.pose.y + self.no_touching_box_rudius * math.sin(angle),
+                        angle + math.pi / 2,
+                    )
+                )
         else:  # 移動する必要がない場合
+            # self.logger.log("no need to rotate")
             pass
 
-        additional_trajectory.append(push_box_start_pose)
+        # 角度を-π ~ πの範囲に収める
+        for i in range(len(additional_trajectory)):
+            additional_trajectory[i].theta = clamp_to_pi_range(
+                additional_trajectory[i].theta
+            )
+
+        # self.logger.log(f"{additional_trajectory}")
+
         self.trajectory.add_trajectory_to_beginning(additional_trajectory)
         self.logger.log("経路を辿ります")
         return True
@@ -842,11 +892,39 @@ class Controller:
         # 経路を辿る
         self.kachaka.move_to_pose_with_box(self.trajectory.get_next_pose(), self.box)
 
-        if self.kachaka.is_pushing_box():
+        if self.kachaka.is_pushing_box():  # 経路的に箱を押しているはず
             # カメラで本当に箱を押しているか確認
-            # self.kachaka.
-            # TODO 押せてなかった場合の補正処理
-            pass
+            diff_theta = 0
+            pushing_status = self.kachaka.check_pushing_box_by_camera()
+            if pushing_status is PushingBoxStatus.DROPPED_LEFT:
+                self.logger.log("箱を左に落としました．")
+                diff_theta = math.radians(30)
+            elif pushing_status is PushingBoxStatus.DROPPED_RIGHT:
+                self.logger.log("箱を右に落としました．")
+                diff_theta = math.radians(-30)
+            else:
+                # 箱が問題なく押せている
+                return False
+
+            # 箱位置をずらす
+            dist = distance(self.kachaka.pose, self.box.pose)
+            self.box.pose = Pose(
+                self.kachaka.pose.x
+                + dist * math.cos(self.kachaka.pose.theta + diff_theta),
+                self.kachaka.pose.y
+                + dist * math.sin(self.kachaka.pose.theta + diff_theta),
+                0,
+            )
+            self.kachaka.is_pushing_box_flag = False  # 押せてません
+
+            # 経路修正
+            self.logger.log("   経路を修正します")
+
+            # 経路生成フェーズからやり直す
+            self.task_queue = [
+                lambda: self.plan_trajectory_of_carrying_box(),
+                lambda: self.plan_trajectory_from_now_position_to_carrying_box_start(),
+            ] + self.task_queue
 
         return False
 
