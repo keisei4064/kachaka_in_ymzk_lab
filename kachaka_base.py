@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from locale import normalize
+from operator import is_
 from typing import List, Callable
 import numpy as np
 import matplotlib.pyplot as plt
@@ -106,6 +108,8 @@ def make_rectangle_to_center(
 
 
 class LidarData:
+    """x,y座標に変換したLiDARの点群データ"""
+
     def __init__(
         self, raw_data_dist: np.ndarray, raw_data_theta: np.ndarray, offset_pose: Pose
     ):
@@ -383,7 +387,7 @@ class KachakaBase(abc.ABC):
         ax.add_patch(point)
         ax.add_patch(arrow)
 
-        # 点群の描画
+        # LiDAR点群の描画
         ax.scatter(
             self.lidar_data.x_data,
             self.lidar_data.y_data,
@@ -399,6 +403,36 @@ class KachakaBase(abc.ABC):
             distination (Pose): 目標姿勢
         """
         pass
+
+    def is_collition_with_box(self, box_pose: Pose) -> bool:
+        dist = distance(self.pose, box_pose)
+        shortest_dist = KachakaBase.box_size.width / 2 + Box.size.height / 2
+        if dist < shortest_dist:
+            return True
+        else:
+            return False
+
+    def move_to_pose_with_box(self, distination: Pose, box: Box) -> None:
+        """箱と共に移動する
+
+        Args:
+            distination (Pose): 目標姿勢
+            box (Box): 箱
+        """
+        prev_pose = self.pose
+        self.move_to_pose(distination)
+        now_pose = self.pose
+        delta_coordinate = Coordinate(
+            now_pose.x - prev_pose.x, now_pose.y - prev_pose.y
+        )
+
+        # 箱との当たり判定
+        while self.is_collition_with_box(box.pose):
+            # 箱の移動
+            box.pose.x += delta_coordinate.x / 10.0
+            box.pose.y += delta_coordinate.y / 10.0
+            if self.is_collition_with_box(box.pose) is False:
+                break
 
     @abc.abstractmethod
     def update_sensor_data(self) -> None:
@@ -479,6 +513,22 @@ class Trajectory:
                 label=label,
             )
 
+    def add_trajectory_to_beginning(self, additional_trajectory: list[Pose]):
+        """現在の経路のはじめに経路を追加する
+
+        Args:
+            additional_trajectory (list[Pose]): 追加経路
+        """
+        self.trace_poses = additional_trajectory + self.trace_poses
+
+    def add_trajectory_to_end(self, additional_trajectory: list[Pose]):
+        """現在の経路の終わりに経路を追加する
+
+        Args:
+            additional_trajectory (list[Pose]): 追加経路
+        """
+        self.trace_poses = self.trace_poses + additional_trajectory
+
 
 class TrajectoryPlannerBase(abc.ABC):
     @abc.abstractmethod
@@ -525,7 +575,7 @@ class StraightTrajectoryPlanner(TrajectoryPlannerBase):
         self, start: Pose, goal: Pose, map: GridMap, push_box: bool
     ) -> Trajectory:
         # 分解能となる距離を計算
-        resolution_distance = map.grid_size.height * 0.9 # マップの1マスよりは小さくする
+        resolution_distance = map.grid_size.height * 0.9  # マップの1マスよりは小さくする
 
         x_move_theta = 0 if start.x < goal.x else math.pi  # x方向移動時の角度
         y_move_theta = math.pi / 2 if start.y < goal.y else -math.pi / 2  # y方向移動時の角度
@@ -625,10 +675,15 @@ class ILogger(abc.ABC):
 
 class TextLogger(ILogger):
     def __init__(self):
-        pass
+        self.history: list[str] = []
 
     def log(self, message: str) -> None:
+        self.history.append(message)
         print(message)
+
+    def show_history(self):
+        for message in self.history:
+            print(message)
 
 
 class ChatLogger(ILogger):
@@ -655,17 +710,19 @@ class Controller:
         self.trajectory_planner = trajectory_planner
         self.logger = logger
         self.trajectory: Trajectory = Trajectory([])
-        # self.action = lambda: self.initialize_sensor()
         # タスクキュー. タスクが完了したらTrueを返す関数を格納する
         self.task_queue: List[Callable[[], bool]] = [
             lambda: self.initialize_sensor(),
             lambda: self.move_from_start_to_initial_box_pose(),
+            lambda: self.follow_trajectory(),
             lambda: self.color_recognize(),
             lambda: self.plan_trajectory_of_carrying_box(),
             lambda: self.plan_trajectory_from_now_position_to_carrying_box_start(),
             lambda: self.follow_trajectory(),
             lambda: self.finish_task(),
         ]
+        # 箱に触れない距離
+        self.no_touching_box_rudius = Box.size.width + KachakaBase.box_size.height
 
     def initialize_sensor(self) -> bool:
         self.logger.log("センサ情報を更新します")
@@ -676,14 +733,16 @@ class Controller:
 
     def move_from_start_to_initial_box_pose(self) -> bool:
         self.logger.log("箱の前まで移動します")
-        self.kachaka.move_to_pose(
-            Pose(
-                self.map.initial_box_pose.x
-                - Box.size.width
-                - KachakaBase.box_size.height,
-                self.map.initial_box_pose.y,
-                0,
-            )
+        # マップから見て箱の左側に移動
+        self.trajectory = Trajectory(
+            [
+                self.kachaka.get_pose(),
+                Pose(
+                    self.map.initial_box_pose.x - self.no_touching_box_rudius,
+                    self.map.initial_box_pose.y,
+                    0,
+                ),
+            ]
         )
         return True
 
@@ -709,7 +768,7 @@ class Controller:
         elif self.box.color is BoxColor.RED:
             goal = self.map.red_box_goal
         else:
-            self.logger.log("箱の色が不明です")
+            self.logger.log("箱の色が不明なため経路を生成できません")
             sys.exit("異常終了")
 
         # 経路生成
@@ -720,84 +779,49 @@ class Controller:
         return True
 
     def plan_trajectory_from_now_position_to_carrying_box_start(self) -> bool:
-        self.logger.log("現在位置から箱運搬経路のスタートまでの経路を生成します")
-
-        # 経路生成
-        # [0]: 箱の左側に移動（そのまま）
-        # [1]: 箱の上側に移動
-        # [2]: 箱の右側に移動
-        # [3]: 箱の下側に移動
-        dist_from_box = KachakaBase.box_size.height + Box.size.height
-        go_start_trajectory = [
-            [],
-            [
-                Pose(
-                    self.map.initial_box_pose.x - dist_from_box,
-                    self.map.initial_box_pose.y + dist_from_box,
-                    math.pi / 2,
-                ),
-                Pose(
-                    self.map.initial_box_pose.x,
-                    self.map.initial_box_pose.y + dist_from_box,
-                    0,
-                ),
-            ],
-            [
-                Pose(
-                    self.map.initial_box_pose.x - dist_from_box,
-                    self.map.initial_box_pose.y + dist_from_box,
-                    math.pi / 2,
-                ),
-                Pose(
-                    self.map.initial_box_pose.x,
-                    self.map.initial_box_pose.y + dist_from_box,
-                    0,
-                ),
-                Pose(
-                    self.map.initial_box_pose.x + dist_from_box,
-                    self.map.initial_box_pose.y + dist_from_box,
-                    0,
-                ),
-                Pose(
-                    self.map.initial_box_pose.x + dist_from_box,
-                    self.map.initial_box_pose.y,
-                    -math.pi / 2,
-                ),
-            ],
-            [
-                Pose(
-                    self.map.initial_box_pose.x - dist_from_box,
-                    self.map.initial_box_pose.y - dist_from_box,
-                    -math.pi / 2,
-                ),
-                Pose(
-                    self.map.initial_box_pose.x,
-                    self.map.initial_box_pose.y - dist_from_box,
-                    0,
-                ),
-            ],
-        ]
-
         delta_x = self.trajectory.trace_poses[1].x - self.trajectory.trace_poses[0].x
         delta_y = self.trajectory.trace_poses[1].y - self.trajectory.trace_poses[0].y
+        move_angle = math.atan2(delta_y, delta_x)
+        self.logger.log(f"箱を運ぶ経路のスタートまでの経路を生成します. 箱の移動方向は{math.degrees(move_angle)}度です")
 
-        # 最初の動きの向きに合わせて経路を付け足す
-        additional_trajectory_index = 0
-        if abs(delta_x) > abs(delta_y):
-            if delta_x > 0:  # [0]
-                additional_trajectory_index = 0
-            else:  # [2]
-                additional_trajectory_index = 2
-        else:
-            if delta_y > 0:  # [3]
-                additional_trajectory_index = 3
-            else:  # [1]
-                additional_trajectory_index = 1
-
-        self.trajectory.trace_poses = (
-            go_start_trajectory[additional_trajectory_index]
-            + self.trajectory.trace_poses
+        # 箱を押し始める位置を計算
+        normalized_delta_x = delta_x / math.sqrt(delta_x**2 + delta_y**2)
+        normalized_delta_y = delta_y / math.sqrt(delta_x**2 + delta_y**2)
+        push_box_start_pose = Pose(
+            self.trajectory.trace_poses[0].x
+            - normalized_delta_x * self.no_touching_box_rudius,
+            self.trajectory.trace_poses[0].y
+            - normalized_delta_y * self.no_touching_box_rudius,
+            move_angle,
         )
+
+        # 箱を避けながら押し始める位置まで円状に移動する経路を生成
+        additional_trajectory: list[Pose] = []
+        if move_angle < 0:  # 箱に対して上に移動する場合
+            angles = np.arange(self.kachaka.pose.theta, move_angle, math.radians(-20))
+            for angle in angles:
+                additional_trajectory.append(
+                    Pose(
+                        self.box.pose.x - self.no_touching_box_rudius * math.cos(angle),
+                        self.box.pose.y - self.no_touching_box_rudius * math.sin(angle),
+                        angle + math.pi / 2,
+                    )
+                )
+        elif move_angle > 0:  # 箱に対して下に移動する場合
+            angles = np.arange(self.kachaka.pose.theta, move_angle, math.radians(+20))
+            for angle in angles:
+                additional_trajectory.append(
+                    Pose(
+                        self.box.pose.x - self.no_touching_box_rudius * math.cos(angle),
+                        self.box.pose.y - self.no_touching_box_rudius * math.sin(angle),
+                        angle - math.pi / 2,
+                    )
+                )
+        else:  # 移動する必要がない場合
+            pass
+
+        additional_trajectory.append(push_box_start_pose)
+        self.trajectory.add_trajectory_to_beginning(additional_trajectory)
         self.logger.log("経路を辿ります")
         return True
 
@@ -807,17 +831,19 @@ class Controller:
             return True
 
         # 経路を辿る
-        self.kachaka.move_to_pose(self.trajectory.get_next_pose())
+        self.kachaka.move_to_pose_with_box(self.trajectory.get_next_pose(), self.box)
         return False
 
     def finish_task(self) -> bool:
         self.logger.log("タスクが完了しました")
-        # sys.exit("正常終了")
         return True
 
     def update(self) -> None:
-        # ロボットのセンサ情報を更新
         self.kachaka.update_sensor_data()
+
+        # LiDARデータから障害物情報を更新
+        lidar_data = self.kachaka.get_lidar_data()
+        self.map.DetectObstacleZone(lidar_data)
 
         # タスクの実行
         result = self.task_queue[0]()
@@ -864,6 +890,7 @@ class Plotter:
         kachaka.draw(self.ax)
         box.draw(self.ax)
         trajectory.draw(self.ax)
+
         self.ax.set_xlim(*self.x_lim)
         self.ax.set_ylim(*self.y_lim)
         plt.legend(loc="center left", bbox_to_anchor=(1.0, 0.5))
@@ -877,7 +904,7 @@ class Plotter:
         display(Image(filename=path))
         self.image_count += 1
 
-    def make_gif(self):
+    def make_gif(self, duration: int = 200):
         image_list = [
             PILImage.open(os.path.join(self.output_dir, f"figure_{i}.png"))
             for i in range(self.image_count)
@@ -886,7 +913,7 @@ class Plotter:
             self.output_dir + "/animation.gif",
             save_all=True,
             append_images=image_list[1:],
-            duration=200,
+            duration=duration,
             loop=0,
         )
 
