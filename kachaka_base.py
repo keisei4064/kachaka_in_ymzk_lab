@@ -327,6 +327,7 @@ class KachakaBase(abc.ABC):
     def __init__(self):
         self.pose = Pose(0, 0, 0)
         self.lidar_data = LidarData(np.array([]), np.array([]), self.pose)
+        self.is_pushing_box_flag = False  # 現在箱を押しているかどうか
 
     def draw(self, ax: matplotlib.axes.Axes):
         # 車体の描画
@@ -427,12 +428,20 @@ class KachakaBase(abc.ABC):
         )
 
         # 箱との当たり判定
+        self.is_pushing_box_flag = False
         while self.is_collition_with_box(box.pose):
+            self.is_pushing_box_flag = True
             # 箱の移動
             box.pose.x += delta_coordinate.x / 10.0
             box.pose.y += delta_coordinate.y / 10.0
-            if self.is_collition_with_box(box.pose) is False:
-                break
+
+    def is_pushing_box(self) -> bool:
+        """箱を押しているかどうかを返す
+
+        Returns:
+            bool: 箱を押している場合True, そうでない場合False
+        """
+        return self.is_pushing_box_flag
 
     @abc.abstractmethod
     def update_sensor_data(self) -> None:
@@ -832,6 +841,13 @@ class Controller:
 
         # 経路を辿る
         self.kachaka.move_to_pose_with_box(self.trajectory.get_next_pose(), self.box)
+
+        if self.kachaka.is_pushing_box():
+            # カメラで本当に箱を押しているか確認
+            # self.kachaka.
+            # TODO 押せてなかった場合の補正処理
+            pass
+
         return False
 
     def finish_task(self) -> bool:
