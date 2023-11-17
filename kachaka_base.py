@@ -1,6 +1,4 @@
 from dataclasses import dataclass
-from locale import normalize
-from operator import is_
 from typing import List, Callable
 import numpy as np
 import matplotlib.pyplot as plt
@@ -844,7 +842,7 @@ class Controller:
             angles = np.arange(
                 now_angle_from_box,
                 now_angle_from_box + clamped_move_angle,
-                math.radians(-20),
+                math.radians(-45),
             )
             for angle in angles:
                 additional_trajectory.append(
@@ -858,7 +856,7 @@ class Controller:
             angles = np.arange(
                 now_angle_from_box,
                 now_angle_from_box + clamped_move_angle,
-                math.radians(+20),
+                math.radians(+45),
             )
             for angle in angles:
                 additional_trajectory.append(
